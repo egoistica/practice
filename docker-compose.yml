@@ -1,11 +1,18 @@
+x-postgres-credentials: &postgres-credentials
+  POSTGRES_DB: ${POSTGRES_DB:-app_db}
+  POSTGRES_USER: ${POSTGRES_USER:-app_user}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_password}
+
+x-app-database-env: &app-database-env
+  <<: *postgres-credentials
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_password}@postgres:5432/${POSTGRES_DB:-app_db}
+
 services:
   postgres:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-app_db}
-      POSTGRES_USER: ${POSTGRES_USER:-app_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_password}
+      <<: *postgres-credentials
     ports:
       - "5432:5432"
     volumes:
@@ -36,7 +43,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://app_user:app_password@postgres:5432/app_db}
+      <<: *app-database-env
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -65,7 +72,7 @@ services:
       dockerfile: Dockerfile.worker
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://app_user:app_password@postgres:5432/app_db}
+      <<: *app-database-env
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
