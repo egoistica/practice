@@ -1,0 +1,1 @@
+# Keep requirements minimal for the bootstrap stage.
