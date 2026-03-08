@@ -1,7 +1,23 @@
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass
 from typing import Any
+
+
+def _resolve_include_modules() -> tuple[str, ...]:
+    candidates = ("backend.celery_app", "celery_app")
+    resolved: list[str] = []
+    for module_name in candidates:
+        try:
+            if importlib.util.find_spec(module_name) is not None:
+                resolved.append(module_name)
+        except (ModuleNotFoundError, ValueError):
+            continue
+
+    if not resolved:
+        return ("celery_app",)
+    return tuple(resolved)
 
 
 @dataclass(frozen=True)
@@ -14,12 +30,16 @@ class CeleryConfig:
     result_serializer: str = "json"
     accept_content: tuple[str, ...] = ("json",)
     enable_utc: bool = True
-    include: tuple[str, ...] = ("backend.celery_app",)
+    include: tuple[str, ...] = ("celery_app",)
 
     @classmethod
     def from_settings(cls, settings: Any) -> "CeleryConfig":
         redis_url = str(getattr(settings, "REDIS_URL", "redis://localhost:6379/0"))
-        return cls(broker_url=redis_url, result_backend=redis_url)
+        return cls(
+            broker_url=redis_url,
+            result_backend=redis_url,
+            include=_resolve_include_modules(),
+        )
 
     def to_celery_conf(self) -> dict[str, Any]:
         return {
