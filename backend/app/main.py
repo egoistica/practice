@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
+    cors_origins = settings.cors_origins_list
+    if not cors_origins:
+        raise RuntimeError("CORS_ORIGINS must contain at least one origin")
+
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
@@ -23,8 +27,8 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=settings.cors_credentials_enabled,
         allow_methods=["*"],
         allow_headers=["*"],
     )
