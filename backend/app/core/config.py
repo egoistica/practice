@@ -17,8 +17,9 @@ except ImportError:
 _DEV_ENVIRONMENTS = {"development", "dev", "local", "test", "testing"}
 _INSECURE_DEFAULTS = {
     "DATABASE_URL": "postgresql+asyncpg://app_user:app_password@localhost:5432/app_db",
-    "JWT_SECRET": "change_me_to_a_long_random_secret",
+    "JWT_SECRET_KEY": "change_me_to_a_long_random_secret",
 }
+_LEGACY_JWT_SECRET_DEFAULT = _INSECURE_DEFAULTS["JWT_SECRET_KEY"]
 _DEFAULT_CORS_ORIGINS = (
     "http://localhost:5173,http://127.0.0.1:5173,"
     "http://localhost:3000,http://127.0.0.1:3000"
@@ -49,7 +50,10 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = _INSECURE_DEFAULTS["DATABASE_URL"]
     REDIS_URL: str = "redis://localhost:6379/0"
-    JWT_SECRET: str = _INSECURE_DEFAULTS["JWT_SECRET"]
+    JWT_SECRET_KEY: str = _INSECURE_DEFAULTS["JWT_SECRET_KEY"]
+    JWT_SECRET: str = _LEGACY_JWT_SECRET_DEFAULT
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     OPENAI_API_KEY: str = ""
     TELEGRAM_BOT_TOKEN: str = ""
     LLM_PROVIDER: str = "openai"
@@ -82,19 +86,43 @@ class Settings(BaseSettings):
             )
         return self.CORS_ALLOW_CREDENTIALS and not self.cors_allow_all
 
+    @property
+    def jwt_secret_key_effective(self) -> str:
+        primary = str(getattr(self, "JWT_SECRET_KEY", "")).strip()
+        legacy = str(getattr(self, "JWT_SECRET", "")).strip()
+
+        if primary and primary != _INSECURE_DEFAULTS["JWT_SECRET_KEY"]:
+            return primary
+        if legacy and legacy != _LEGACY_JWT_SECRET_DEFAULT:
+            return legacy
+        return primary or legacy
+
     def validate_runtime_config(self) -> None:
-        for key in ("DATABASE_URL", "JWT_SECRET"):
+        for key in ("DATABASE_URL",):
             value = getattr(self, key, "")
             if not str(value).strip():
                 raise RuntimeError(f"{key} must be set")
 
+        jwt_secret = self.jwt_secret_key_effective
+        if not jwt_secret:
+            raise RuntimeError("JWT_SECRET_KEY (or legacy JWT_SECRET) must be set")
+        self.JWT_SECRET_KEY = jwt_secret
+
+        if not str(getattr(self, "JWT_ALGORITHM", "")).strip():
+            raise RuntimeError("JWT_ALGORITHM must be set")
+        if int(getattr(self, "ACCESS_TOKEN_EXPIRE_MINUTES", 0)) <= 0:
+            raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be greater than zero")
+
         if not self.is_dev_mode:
-            for key, insecure_default in _INSECURE_DEFAULTS.items():
-                value = str(getattr(self, key, ""))
-                if value == insecure_default:
-                    raise RuntimeError(
-                        f"{key} is using insecure default value; set a secure value in environment"
-                    )
+            database_url = str(getattr(self, "DATABASE_URL", ""))
+            if database_url == _INSECURE_DEFAULTS["DATABASE_URL"]:
+                raise RuntimeError(
+                    "DATABASE_URL is using insecure default value; set a secure value in environment"
+                )
+            if jwt_secret == _INSECURE_DEFAULTS["JWT_SECRET_KEY"]:
+                raise RuntimeError(
+                    "JWT_SECRET_KEY is using insecure default value; set a secure value in environment"
+                )
 
             llm_provider = str(getattr(self, "LLM_PROVIDER", "")).lower().strip()
             if llm_provider == "openai":
@@ -133,7 +161,13 @@ def get_settings() -> Settings:
             CORS_ALLOW_CREDENTIALS=_env_bool("CORS_ALLOW_CREDENTIALS", True),
             DATABASE_URL=os.getenv("DATABASE_URL", _INSECURE_DEFAULTS["DATABASE_URL"]),
             REDIS_URL=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-            JWT_SECRET=os.getenv("JWT_SECRET", _INSECURE_DEFAULTS["JWT_SECRET"]),
+            JWT_SECRET_KEY=os.getenv(
+                "JWT_SECRET_KEY",
+                os.getenv("JWT_SECRET", _INSECURE_DEFAULTS["JWT_SECRET_KEY"]),
+            ),
+            JWT_SECRET=os.getenv("JWT_SECRET", _LEGACY_JWT_SECRET_DEFAULT),
+            JWT_ALGORITHM=os.getenv("JWT_ALGORITHM", "HS256"),
+            ACCESS_TOKEN_EXPIRE_MINUTES=int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")),
             OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
             TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             LLM_PROVIDER=os.getenv("LLM_PROVIDER", "openai"),
