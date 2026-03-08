@@ -13,7 +13,6 @@ from app.core.dependencies import get_db, require_admin
 from app.core.security import hash_password
 from app.models.token_transaction import TokenTransaction
 from app.models.user import User
-from app.models.user_session import UserSession
 from app.schemas.admin_users import (
     AdminAddTokensRequest,
     AdminAddTokensResponse,
@@ -48,13 +47,11 @@ def _client_ip(request: Request) -> str:
 
 
 async def _log_admin_action(
-    db: AsyncSession,
     request: Request,
     admin_user: User,
     action: str,
     target_user_id: UUID | None = None,
 ) -> None:
-    db.add(UserSession(user_id=admin_user.id, ip=_client_ip(request)))
     logger.info(
         "admin_action action=%s admin_user_id=%s target_user_id=%s ip=%s",
         action,
@@ -85,8 +82,7 @@ async def list_users(
     users = users_result.scalars().all()
     total = int((await db.execute(count_query)).scalar_one())
 
-    await _log_admin_action(db, request, admin_user, action="list_users")
-    await db.commit()
+    await _log_admin_action(request, admin_user, action="list_users")
 
     return AdminUsersListResponse(
         items=[_to_user_response(user) for user in users],
@@ -109,8 +105,18 @@ async def create_user(
 
     if not username:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is required")
+    if len(username) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username must be at least 3 characters",
+        )
     if not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")
+    if len(email) < 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email must be at least 5 characters",
+        )
 
     if payload.generate_password:
         generated_password = secrets.token_urlsafe(12)
@@ -136,7 +142,7 @@ async def create_user(
     db.add(user)
     try:
         await db.flush()
-        await _log_admin_action(db, request, admin_user, action="create_user", target_user_id=user.id)
+        await _log_admin_action(request, admin_user, action="create_user", target_user_id=user.id)
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -172,7 +178,7 @@ async def update_user_status(
     if payload.is_admin is not None:
         user.is_admin = payload.is_admin
 
-    await _log_admin_action(db, request, admin_user, action="update_user_status", target_user_id=user.id)
+    await _log_admin_action(request, admin_user, action="update_user_status", target_user_id=user.id)
     await db.commit()
     await db.refresh(user)
     return _to_user_response(user)
@@ -196,7 +202,7 @@ async def deactivate_user(
         )
 
     user.is_active = False
-    await _log_admin_action(db, request, admin_user, action="deactivate_user", target_user_id=user.id)
+    await _log_admin_action(request, admin_user, action="deactivate_user", target_user_id=user.id)
     await db.commit()
     await db.refresh(user)
     return _to_user_response(user)
@@ -223,7 +229,7 @@ async def add_tokens(
         )
     )
     user.token_balance += payload.amount
-    await _log_admin_action(db, request, admin_user, action="add_tokens", target_user_id=user.id)
+    await _log_admin_action(request, admin_user, action="add_tokens", target_user_id=user.id)
     await db.commit()
     await db.refresh(user)
 
