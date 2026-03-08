@@ -110,6 +110,15 @@ class AuthDependenciesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["role"], "admin")
 
+    async def test_inactive_user_gets_401(self) -> None:
+        user = build_user(is_admin=False)
+        user.is_active = False
+        self._override_db([user])
+        token = create_access_token({"user_id": user.id}, expires_delta=timedelta(minutes=10))
+        response = await self._request("GET", "/me", headers={"Authorization": f"Bearer {token}"})
+
+        self.assertEqual(response.status_code, 401)
+
 
 if __name__ == "__main__":
     unittest.main()
