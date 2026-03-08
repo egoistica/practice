@@ -8,7 +8,7 @@ from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import auth_router
+from .api import admin_users_router, auth_router
 from .core.config import settings
 from .core.dependencies import get_celery_app
 
@@ -36,6 +36,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(auth_router)
+    app.include_router(admin_users_router)
 
     @app.middleware("http")
     async def add_process_time_header(request: Request, call_next):
