@@ -5,7 +5,7 @@ x-postgres-credentials: &postgres-credentials
 
 x-app-database-env: &app-database-env
   <<: *postgres-credentials
-  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_password}@postgres:5432/${POSTGRES_DB:-app_db}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_password}@postgres:5432/${POSTGRES_DB:-app_db}
 
 services:
   postgres:
