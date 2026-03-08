@@ -96,11 +96,12 @@ class Settings(BaseSettings):
                         f"{key} is using insecure default value; set a secure value in environment"
                     )
 
-            for key in ("OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN"):
-                value = str(getattr(self, key, ""))
-                if not value.strip():
+            llm_provider = str(getattr(self, "LLM_PROVIDER", "")).lower().strip()
+            if llm_provider == "openai":
+                openai_api_key = str(getattr(self, "OPENAI_API_KEY", ""))
+                if not openai_api_key.strip():
                     raise RuntimeError(
-                        f"{key} must be set outside development/test environments"
+                        "OPENAI_API_KEY must be set when LLM_PROVIDER=openai outside development/test environments"
                     )
 
         _ = self.cors_origins_list
