@@ -4,10 +4,12 @@ import logging
 import time
 
 import uvicorn
-from fastapi import FastAPI, Request
+from celery import Celery
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
+from .core.dependencies import get_celery_app
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,18 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def healthcheck() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/health/celery")
+    async def celery_health(celery: Celery = Depends(get_celery_app)) -> dict[str, object]:
+        try:
+            inspector = celery.control.inspect(timeout=1)
+            active = inspector.active() if inspector else {}
+        except Exception as exc:  # pragma: no cover - defensive for runtime infra issues
+            return {"workers": [], "active_tasks": 0, "error": str(exc)}
+
+        workers = list((active or {}).keys())
+        active_tasks = sum(len(tasks) for tasks in (active or {}).values())
+        return {"workers": workers, "active_tasks": active_tasks}
 
     return app
 
