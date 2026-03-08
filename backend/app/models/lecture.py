@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import enum
 import uuid
@@ -36,6 +36,10 @@ class Lecture(Base):
     __tablename__ = "lecture"
     __table_args__ = (
         CheckConstraint("processing_progress >= 0 AND processing_progress <= 100", name="ck_lecture_processing_progress_range"),
+        CheckConstraint(
+            "(source_type != 'url' OR source_url IS NOT NULL) AND (source_type != 'file' OR file_path IS NOT NULL)",
+            name="ck_lecture_source_type_payload",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -70,3 +74,4 @@ class Lecture(Base):
         onupdate=func.now(),
         nullable=False,
     )
+

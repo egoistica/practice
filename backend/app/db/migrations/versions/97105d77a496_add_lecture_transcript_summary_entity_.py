@@ -36,6 +36,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.CheckConstraint('processing_progress >= 0 AND processing_progress <= 100', name='ck_lecture_processing_progress_range'),
+    sa.CheckConstraint("(source_type != 'url' OR source_url IS NOT NULL) AND (source_type != 'file' OR file_path IS NOT NULL)", name='ck_lecture_source_type_payload'),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -58,6 +59,7 @@ def upgrade() -> None:
     sa.Column('timecode_start', sa.Float(), nullable=True),
     sa.Column('timecode_end', sa.Float(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.CheckConstraint('(timecode_start IS NULL OR timecode_start >= 0) AND (timecode_end IS NULL OR timecode_end >= 0) AND (timecode_start IS NULL OR timecode_end IS NULL OR timecode_end >= timecode_start)', name='ck_summary_timecode_range'),
     sa.ForeignKeyConstraint(['lecture_id'], ['lecture.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -85,4 +87,8 @@ def downgrade() -> None:
     op.drop_table('entity_graph')
     op.drop_index(op.f('ix_lecture_user_id'), table_name='lecture')
     op.drop_table('lecture')
+    postgresql.ENUM(name='lecture_mode').drop(op.get_bind(), checkfirst=True)
+    postgresql.ENUM(name='lecture_status').drop(op.get_bind(), checkfirst=True)
+    postgresql.ENUM(name='lecture_source_type').drop(op.get_bind(), checkfirst=True)
     # ### end Alembic commands ###
+
