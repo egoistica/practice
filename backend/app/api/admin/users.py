@@ -161,6 +161,12 @@ async def update_user_status(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    if admin_user.id == user.id and (payload.is_admin is False or payload.is_active is False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admins cannot revoke their own admin access or deactivate themselves",
+        )
+
     if payload.is_active is not None:
         user.is_active = payload.is_active
     if payload.is_admin is not None:
@@ -183,6 +189,12 @@ async def deactivate_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    if admin_user.id == user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admins cannot revoke their own admin access or deactivate themselves",
+        )
+
     user.is_active = False
     await _log_admin_action(db, request, admin_user, action="deactivate_user", target_user_id=user.id)
     await db.commit()
@@ -198,11 +210,11 @@ async def add_tokens(
     db: AsyncSession = Depends(get_db),
     admin_user: User = Depends(require_admin),
 ) -> AdminAddTokensResponse:
-    user = await db.get(User, user_id)
+    result = await db.execute(select(User).where(User.id == user_id).with_for_update())
+    user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    user.token_balance += payload.amount
     db.add(
         TokenTransaction(
             user_id=user.id,
@@ -210,6 +222,7 @@ async def add_tokens(
             reason=payload.reason,
         )
     )
+    user.token_balance += payload.amount
     await _log_admin_action(db, request, admin_user, action="add_tokens", target_user_id=user.id)
     await db.commit()
     await db.refresh(user)
