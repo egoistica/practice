@@ -5,7 +5,7 @@ import time
 
 import uvicorn
 from celery import Celery
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
@@ -61,8 +61,9 @@ def create_app() -> FastAPI:
         try:
             inspector = celery.control.inspect(timeout=1)
             active = inspector.active() if inspector else {}
-        except Exception as exc:  # pragma: no cover - defensive for runtime infra issues
-            return {"workers": [], "active_tasks": 0, "error": str(exc)}
+        except Exception:
+            logger.exception("Celery health check failed")
+            raise HTTPException(status_code=503, detail="dependency unavailable") from None
 
         workers = list((active or {}).keys())
         active_tasks = sum(len(tasks) for tasks in (active or {}).values())
