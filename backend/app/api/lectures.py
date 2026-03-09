@@ -303,6 +303,8 @@ async def get_lecture(
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
 
+    response = _to_lecture_response(lecture)
+
     try:
         history_updated = await record_history_visit(db, user.id, lecture.id)
         if history_updated:
@@ -311,7 +313,7 @@ async def get_lecture(
         await db.rollback()
         logger.exception("Failed to record lecture history user_id=%s lecture_id=%s", user.id, lecture.id)
 
-    return _to_lecture_response(lecture)
+    return response
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)
