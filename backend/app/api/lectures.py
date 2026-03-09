@@ -13,11 +13,14 @@ import redis.asyncio as redis
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
 from app.core.dependencies import get_current_user, get_db
+from app.core.security import decode_token
 from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureStatus
 from app.models.user import User
 from app.schemas.lecture import CreateLectureRequest, LectureListResponse, LectureResponse
@@ -28,6 +31,8 @@ ws_router = APIRouter(tags=["lectures"])
 logger = logging.getLogger(__name__)
 
 PROGRESS_CHANNEL = "lecture_progress"
+REDIS_RETRY_BASE_SECONDS = 0.5
+REDIS_RETRY_MAX_SECONDS = 5.0
 _INSTANCE_ID = uuid.uuid4().hex
 _subscriptions: dict[uuid.UUID, set[WebSocket]] = defaultdict(set)
 _subscriptions_lock = asyncio.Lock()
@@ -81,6 +86,31 @@ def _progress_payload(lecture_id: uuid.UUID, progress: int, status_value: str | 
     if status_value is not None:
         payload["status"] = status_value
     return payload
+
+
+async def _resolve_websocket_user(websocket: WebSocket, db: AsyncSession) -> User:
+    authorization = websocket.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        payload = decode_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    raw_user_id = payload.get("user_id")
+    try:
+        user_id = uuid.UUID(str(raw_user_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload") from None
+
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive")
+    return user
 
 
 async def _broadcast_local(lecture_id: uuid.UUID, payload: dict[str, object]) -> None:
@@ -140,25 +170,63 @@ def broadcast_progress_sync(
 
 async def _progress_listener_loop() -> None:
     global _redis_pubsub
-    client = await _get_redis_client()
-    _redis_pubsub = client.pubsub(ignore_subscribe_messages=True)
-    await _redis_pubsub.subscribe(PROGRESS_CHANNEL)
+    retry_delay = REDIS_RETRY_BASE_SECONDS
 
     try:
         while True:
-            message = await _redis_pubsub.get_message(timeout=1.0)
+            if _redis_pubsub is None:
+                try:
+                    client = await _get_redis_client()
+                    _redis_pubsub = client.pubsub(ignore_subscribe_messages=True)
+                    await _redis_pubsub.subscribe(PROGRESS_CHANNEL)
+                    retry_delay = REDIS_RETRY_BASE_SECONDS
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Failed to initialize redis pubsub for lecture progress listener")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, REDIS_RETRY_MAX_SECONDS)
+                    continue
+
+            try:
+                message = await _redis_pubsub.get_message(timeout=1.0)
+            except asyncio.CancelledError:
+                raise
+            except RedisError:
+                logger.exception("Redis get_message failed in lecture progress listener")
+                await _close_redis_pubsub()
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, REDIS_RETRY_MAX_SECONDS)
+                continue
+            except Exception:
+                logger.exception("Unexpected redis listener error while reading message")
+                await _close_redis_pubsub()
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, REDIS_RETRY_MAX_SECONDS)
+                continue
+
             if not message:
                 await asyncio.sleep(0.05)
                 continue
 
-            raw_data = message.get("data")
-            if not raw_data:
-                continue
-
             try:
+                if not isinstance(message, dict):
+                    logger.warning("Invalid redis message type for lecture progress: %s", type(message).__name__)
+                    continue
+
+                raw_data = message.get("data")
+                if not raw_data:
+                    continue
+
+                if isinstance(raw_data, bytes):
+                    raw_data = raw_data.decode("utf-8", errors="ignore")
+
                 payload = json.loads(raw_data)
-            except json.JSONDecodeError:
-                logger.warning("Invalid progress payload received from redis")
+                if not isinstance(payload, dict):
+                    logger.warning("Invalid redis payload shape for lecture progress")
+                    continue
+            except Exception:
+                logger.exception("Failed to parse lecture progress payload from redis; skipping message")
                 continue
 
             if str(payload.get("source", "")) == _INSTANCE_ID:
@@ -171,18 +239,26 @@ async def _progress_listener_loop() -> None:
                 logger.warning("Invalid lecture_id in progress payload: %s", raw_lecture_id)
                 continue
 
-            await _broadcast_local(lecture_id, payload)
+            try:
+                await _broadcast_local(lecture_id, payload)
+            except Exception:
+                logger.exception("Failed to broadcast lecture progress locally for lecture_id=%s", lecture_id)
     except asyncio.CancelledError:
         raise
     except Exception:
         logger.exception("Lecture progress redis listener stopped unexpectedly")
     finally:
-        if _redis_pubsub is not None:
-            close_fn = getattr(_redis_pubsub, "aclose", None) or _redis_pubsub.close
-            close_result = close_fn()
-            if asyncio.iscoroutine(close_result):
-                await close_result
-            _redis_pubsub = None
+        await _close_redis_pubsub()
+
+
+async def _close_redis_pubsub() -> None:
+    global _redis_pubsub
+    if _redis_pubsub is not None:
+        close_fn = getattr(_redis_pubsub, "aclose", None) or _redis_pubsub.close
+        close_result = close_fn()
+        if asyncio.iscoroutine(close_result):
+            await close_result
+        _redis_pubsub = None
 
 
 async def start_progress_listener() -> None:
@@ -415,6 +491,21 @@ async def delete_lecture(
 
 @ws_router.websocket("/ws/{lecture_id}")
 async def lecture_progress_ws(websocket: WebSocket, lecture_id: uuid.UUID) -> None:
+    async with AsyncSessionLocal() as db:
+        try:
+            user = await _resolve_websocket_user(websocket, db)
+        except HTTPException as exc:
+            await websocket.close(code=4401, reason=str(exc.detail))
+            return
+
+        lecture = await db.get(Lecture, lecture_id)
+        if lecture is None:
+            await websocket.close(code=4403, reason="Lecture not found")
+            return
+        if lecture.user_id != user.id:
+            await websocket.close(code=4403, reason="Forbidden")
+            return
+
     await websocket.accept()
     await _register_subscription(lecture_id, websocket)
     await websocket.send_json({"type": "subscribed", "lecture_id": str(lecture_id)})

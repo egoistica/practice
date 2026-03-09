@@ -37,9 +37,10 @@ def publish_lecture_progress(lecture_id: str, progress: int, status_value: str |
         from app.api.lectures import broadcast_progress_sync
 
     lecture_uuid = UUID(str(lecture_id))
-    broadcast_progress_sync(lecture_uuid, int(progress), status_value)
+    normalized_progress = max(0, min(100, int(progress)))
+    broadcast_progress_sync(lecture_uuid, normalized_progress, status_value)
     return {
         "lecture_id": str(lecture_uuid),
-        "progress": int(progress),
+        "progress": normalized_progress,
         "status": status_value,
     }
