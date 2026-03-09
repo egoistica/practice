@@ -9,9 +9,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import admin_users_router, auth_router, lectures_router, lectures_ws_router
-from .api.lectures import start_progress_listener, stop_progress_listener
 from .core.config import settings
 from .core.dependencies import get_celery_app
+from .services.progress_service import start_progress_listener, stop_progress_listener
 
 
 logger = logging.getLogger(__name__)

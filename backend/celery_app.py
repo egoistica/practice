@@ -32,9 +32,9 @@ def ping() -> str:
 def publish_lecture_progress(lecture_id: str, progress: int, status_value: str | None = None) -> dict[str, object]:
     """Publish lecture progress updates from worker processes."""
     try:
-        from backend.app.api.lectures import broadcast_progress_sync
+        from backend.app.services.progress_service import broadcast_progress_sync
     except ModuleNotFoundError:
-        from app.api.lectures import broadcast_progress_sync
+        from app.services.progress_service import broadcast_progress_sync
 
     lecture_uuid = UUID(str(lecture_id))
     normalized_progress = max(0, min(100, int(progress)))
