@@ -16,7 +16,8 @@ yt-dlp==2024.04.09
 faster-whisper==0.10.0; platform_system != "Windows"
 ffmpeg-python==0.2.0
 requests==2.31.0
-python-multipart==0.0.9
+python-multipart==0.0.22
+aiofiles==24.1.0
 uvicorn==0.24.0
 slowapi==0.1.9
 alembic==1.13.1

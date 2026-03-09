@@ -87,7 +87,7 @@ async def create_lecture(
 ) -> LectureResponse:
     lecture_id = uuid.uuid4()
     file_path: str | None = None
-    source_url: str | None = payload.source_url
+    source_url: str | None = str(payload.source_url) if payload.source_url else None
     if file is not None and not file.filename:
         file = None
 
@@ -206,15 +206,16 @@ async def delete_lecture(
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
 
+    await db.delete(lecture)
+    await db.commit()
+
     try:
         delete_lecture_media(settings.MEDIA_ROOT, lecture_id)
     except OSError:
-        logger.exception("Failed to delete lecture media directory for lecture_id=%s", lecture_id)
+        logger.exception("Failed at media deletion stage for lecture_id=%s", lecture_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete lecture media",
         ) from None
 
-    await db.delete(lecture)
-    await db.commit()
     return {"status": "deleted", "lecture_id": str(lecture_id)}

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-import stat
 import shutil
+import stat
 import uuid
 from pathlib import Path
 
+import aiofiles
 from fastapi import UploadFile
 
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov"}
@@ -53,12 +54,12 @@ async def save_uploaded_file(upload_file: UploadFile, media_root: str, lecture_i
     stored_name = generate_storage_name(suffix)
     destination = lecture_dir / stored_name
 
-    with destination.open("wb") as file_obj:
+    async with aiofiles.open(destination, "wb") as file_obj:
         while True:
             chunk = await upload_file.read(1024 * 1024)
             if not chunk:
                 break
-            file_obj.write(chunk)
+            await file_obj.write(chunk)
 
     await upload_file.close()
     return str(Path(str(lecture_id)) / stored_name)
