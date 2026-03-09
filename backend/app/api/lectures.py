@@ -1,23 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
+from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
 from app.core.dependencies import get_current_user, get_db
+from app.core.security import decode_token
 from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureStatus
 from app.models.user import User
 from app.schemas.lecture import CreateLectureRequest, LectureListResponse, LectureResponse
 from app.services.file_service import delete_lecture_media, save_uploaded_file
+from app.services.progress_service import (
+    broadcast_progress,
+    register_subscription,
+    unregister_subscription,
+)
 
 router = APIRouter(prefix="/lectures", tags=["lectures"])
+ws_router = APIRouter(tags=["lectures"])
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +39,82 @@ def _to_lecture_response(lecture: Lecture) -> LectureResponse:
         processing_progress=lecture.processing_progress,
         created_at=lecture.created_at,
     )
+
+
+def _normalize_bearer_token(raw_value: str | None) -> str | None:
+    if not raw_value:
+        return None
+    token = raw_value.strip()
+    if not token:
+        return None
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token or None
+
+
+def _extract_websocket_token(websocket: WebSocket) -> str | None:
+    token = _normalize_bearer_token(websocket.headers.get("authorization"))
+    if token:
+        return token
+
+    for cookie_name in ("access_token", "token", "authorization"):
+        token = _normalize_bearer_token(websocket.cookies.get(cookie_name))
+        if token:
+            return token
+
+    return _normalize_bearer_token(websocket.query_params.get("token"))
+
+
+def _is_websocket_origin_allowed(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True
+    if settings.cors_allow_all:
+        return True
+    return origin in settings.cors_origins_list
+
+
+async def _receive_token_from_first_message(websocket: WebSocket) -> str:
+    try:
+        payload = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated") from None
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    token = _normalize_bearer_token(payload.get("token"))
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    return token
+
+
+async def _resolve_websocket_user(
+    websocket: WebSocket,
+    db: AsyncSession,
+    token_override: str | None = None,
+) -> User:
+    token = _normalize_bearer_token(token_override) or _extract_websocket_token(websocket)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        payload = decode_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    raw_user_id = payload.get("user_id")
+    try:
+        user_id = uuid.UUID(str(raw_user_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload") from None
+
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive")
+    return user
 
 
 def _parse_selected_entities(raw: str | None) -> list[str] | None:
@@ -155,6 +241,11 @@ async def create_lecture(
             payload.selected_entities,
         )
 
+    await broadcast_progress(
+        lecture.id,
+        lecture.processing_progress,
+        lecture.status.value if hasattr(lecture.status, "value") else str(lecture.status),
+    )
     return _to_lecture_response(lecture)
 
 
@@ -227,3 +318,58 @@ async def delete_lecture(
         logger.exception("Failed at media deletion stage for lecture_id=%s", lecture_id)
 
     return {"status": "deleted", "lecture_id": str(lecture_id)}
+
+
+@ws_router.websocket("/ws/{lecture_id}")
+async def lecture_progress_ws(websocket: WebSocket, lecture_id: uuid.UUID) -> None:
+    if not _is_websocket_origin_allowed(websocket):
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
+
+    accepted = False
+    subscribed = False
+    token = _extract_websocket_token(websocket)
+
+    if token is None:
+        await websocket.accept()
+        accepted = True
+        try:
+            token = await _receive_token_from_first_message(websocket)
+        except HTTPException as exc:
+            await websocket.close(code=4401, reason=str(exc.detail))
+            return
+
+    async with AsyncSessionLocal() as db:
+        try:
+            user = await _resolve_websocket_user(websocket, db, token_override=token)
+        except HTTPException as exc:
+            close_code = 4401 if exc.status_code == status.HTTP_401_UNAUTHORIZED else 4403
+            await websocket.close(code=close_code, reason=str(exc.detail))
+            return
+
+        lecture = await db.get(Lecture, lecture_id)
+        if lecture is None:
+            await websocket.close(code=4403, reason="Lecture not found")
+            return
+        if lecture.user_id != user.id:
+            await websocket.close(code=4403, reason="Forbidden")
+            return
+
+    if not accepted:
+        await websocket.accept()
+        accepted = True
+
+    await register_subscription(lecture_id, websocket)
+    subscribed = True
+    await websocket.send_json({"type": "subscribed", "lecture_id": str(lecture_id)})
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if subscribed:
+            await unregister_subscription(lecture_id, websocket)

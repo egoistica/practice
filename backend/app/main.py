@@ -8,9 +8,10 @@ from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import admin_users_router, auth_router, lectures_router
+from .api import admin_users_router, auth_router, lectures_router, lectures_ws_router
 from .core.config import settings
 from .core.dependencies import get_celery_app
+from .services.progress_service import start_progress_listener, stop_progress_listener
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,15 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(admin_users_router)
     app.include_router(lectures_router)
+    app.include_router(lectures_ws_router)
+
+    @app.on_event("startup")
+    async def startup_progress_listener() -> None:
+        await start_progress_listener()
+
+    @app.on_event("shutdown")
+    async def shutdown_progress_listener() -> None:
+        await stop_progress_listener()
 
     @app.middleware("http")
     async def add_process_time_header(request: Request, call_next):
