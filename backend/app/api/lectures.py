@@ -132,8 +132,20 @@ async def create_lecture(
         processing_progress=0,
     )
     db.add(lecture)
-    await db.commit()
-    await db.refresh(lecture)
+    try:
+        await db.commit()
+        await db.refresh(lecture)
+    except Exception:
+        await db.rollback()
+        if file_path:
+            try:
+                delete_lecture_media(settings.MEDIA_ROOT, lecture_id)
+            except OSError:
+                logger.exception(
+                    "Failed to cleanup lecture media after DB commit/refresh failure for lecture_id=%s",
+                    lecture_id,
+                )
+        raise
 
     if payload.selected_entities:
         logger.info(
@@ -213,9 +225,5 @@ async def delete_lecture(
         delete_lecture_media(settings.MEDIA_ROOT, lecture_id)
     except OSError:
         logger.exception("Failed at media deletion stage for lecture_id=%s", lecture_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete lecture media",
-        ) from None
 
     return {"status": "deleted", "lecture_id": str(lecture_id)}

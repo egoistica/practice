@@ -16,6 +16,8 @@ ALLOWED_VIDEO_MIME_TYPES = {
     "video/x-matroska",
     "video/quicktime",
 }
+CHUNK_SIZE_BYTES = 1024 * 1024
+MAX_UPLOAD_SIZE_BYTES = 500 * 1024 * 1024
 
 
 def _safe_suffix(filename: str | None) -> str:
@@ -31,9 +33,10 @@ def validate_video_file(upload_file: UploadFile) -> str:
         raise ValueError("Unsupported file extension. Allowed: MP4, AVI, MKV, MOV")
 
     content_type = (upload_file.content_type or "").lower()
-    if content_type and content_type != "application/octet-stream":
-        if content_type not in ALLOWED_VIDEO_MIME_TYPES:
-            raise ValueError("Unsupported MIME type for video upload")
+    if content_type == "application/octet-stream":
+        raise ValueError("application/octet-stream uploads are not allowed")
+    if content_type and content_type not in ALLOWED_VIDEO_MIME_TYPES:
+        raise ValueError("Unsupported MIME type for video upload")
 
     return suffix
 
@@ -46,23 +49,43 @@ def generate_storage_name(suffix: str) -> str:
     return f"{uuid.uuid4().hex}{suffix}"
 
 
-async def save_uploaded_file(upload_file: UploadFile, media_root: str, lecture_id: uuid.UUID) -> str:
+async def save_uploaded_file(
+    upload_file: UploadFile,
+    media_root: str,
+    lecture_id: uuid.UUID,
+    max_upload_size: int = MAX_UPLOAD_SIZE_BYTES,
+) -> str:
     suffix = validate_video_file(upload_file)
     lecture_dir = build_lecture_dir(media_root, lecture_id)
     lecture_dir.mkdir(parents=True, exist_ok=True)
 
     stored_name = generate_storage_name(suffix)
     destination = lecture_dir / stored_name
+    temp_destination = destination.with_suffix(f"{destination.suffix}.part")
+    bytes_written = 0
 
-    async with aiofiles.open(destination, "wb") as file_obj:
-        while True:
-            chunk = await upload_file.read(1024 * 1024)
-            if not chunk:
-                break
-            await file_obj.write(chunk)
+    try:
+        async with aiofiles.open(temp_destination, "wb") as file_obj:
+            while True:
+                chunk = await upload_file.read(CHUNK_SIZE_BYTES)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > max_upload_size:
+                    raise ValueError(f"File is too large. Maximum size is {max_upload_size} bytes")
+                await file_obj.write(chunk)
 
-    await upload_file.close()
-    return str(Path(str(lecture_id)) / stored_name)
+        temp_destination.replace(destination)
+        return str(Path(str(lecture_id)) / stored_name)
+    except Exception:
+        if temp_destination.exists():
+            try:
+                temp_destination.unlink()
+            except OSError:
+                pass
+        raise
+    finally:
+        await upload_file.close()
 
 
 def delete_lecture_media(media_root: str, lecture_id: uuid.UUID) -> None:
