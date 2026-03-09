@@ -10,6 +10,7 @@ from .admin_users import (
     AdminUsersListResponse,
 )
 from .auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
+from .lecture import CreateLectureRequest, LectureListResponse, LectureResponse
 
 __all__ = [
     "AdminAddTokensRequest",
@@ -19,6 +20,9 @@ __all__ = [
     "AdminUpdateUserRequest",
     "AdminUserResponse",
     "AdminUsersListResponse",
+    "CreateLectureRequest",
+    "LectureListResponse",
+    "LectureResponse",
     "LoginRequest",
     "RefreshRequest",
     "RegisterRequest",
