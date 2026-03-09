@@ -9,17 +9,23 @@ from typing import Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.dependencies import get_current_user, get_db
 from app.core.security import decode_token
+from app.models.entity_graph import EntityGraph
+from app.models.favourite import Favourite
+from app.models.history import History
 from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureStatus
+from app.models.summary import Summary
+from app.models.transcript import Transcript
 from app.models.user import User
 from app.schemas.lecture import CreateLectureRequest, LectureListResponse, LectureResponse
 from app.services.file_service import delete_lecture_media, save_uploaded_file
+from app.services.history_service import record_history_visit
 from app.services.progress_service import (
     broadcast_progress,
     register_subscription,
@@ -296,7 +302,18 @@ async def get_lecture(
     lecture = await db.get(Lecture, lecture_id)
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
-    return _to_lecture_response(lecture)
+
+    response = _to_lecture_response(lecture)
+
+    try:
+        history_updated = await record_history_visit(db, user.id, lecture.id)
+        if history_updated:
+            await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("Failed to record lecture history user_id=%s lecture_id=%s", user.id, lecture.id)
+
+    return response
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)
@@ -309,6 +326,11 @@ async def delete_lecture(
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
 
+    await db.execute(delete(Favourite).where(Favourite.lecture_id == lecture_id))
+    await db.execute(delete(History).where(History.lecture_id == lecture_id))
+    await db.execute(delete(Transcript).where(Transcript.lecture_id == lecture_id))
+    await db.execute(delete(Summary).where(Summary.lecture_id == lecture_id))
+    await db.execute(delete(EntityGraph).where(EntityGraph.lecture_id == lecture_id))
     await db.delete(lecture)
     await db.commit()
 

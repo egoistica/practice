@@ -10,6 +10,12 @@ from .admin_users import (
     AdminUsersListResponse,
 )
 from .auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
+from .engagement import (
+    FavouriteLectureResponse,
+    FavouritesListResponse,
+    HistoryLectureResponse,
+    HistoryListResponse,
+)
 from .lecture import CreateLectureRequest, LectureListResponse, LectureResponse
 
 __all__ = [
@@ -21,6 +27,10 @@ __all__ = [
     "AdminUserResponse",
     "AdminUsersListResponse",
     "CreateLectureRequest",
+    "FavouriteLectureResponse",
+    "FavouritesListResponse",
+    "HistoryLectureResponse",
+    "HistoryListResponse",
     "LectureListResponse",
     "LectureResponse",
     "LoginRequest",
