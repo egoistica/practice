@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
+from collections import defaultdict
+from contextlib import suppress
+from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+import redis.asyncio as redis
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
+from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +24,17 @@ from app.schemas.lecture import CreateLectureRequest, LectureListResponse, Lectu
 from app.services.file_service import delete_lecture_media, save_uploaded_file
 
 router = APIRouter(prefix="/lectures", tags=["lectures"])
+ws_router = APIRouter(tags=["lectures"])
 logger = logging.getLogger(__name__)
+
+PROGRESS_CHANNEL = "lecture_progress"
+_INSTANCE_ID = uuid.uuid4().hex
+_subscriptions: dict[uuid.UUID, set[WebSocket]] = defaultdict(set)
+_subscriptions_lock = asyncio.Lock()
+_listener_lock = asyncio.Lock()
+_redis_client: redis.Redis | None = None
+_redis_pubsub = None
+_listener_task: asyncio.Task[None] | None = None
 
 
 def _to_lecture_response(lecture: Lecture) -> LectureResponse:
@@ -29,6 +45,169 @@ def _to_lecture_response(lecture: Lecture) -> LectureResponse:
         processing_progress=lecture.processing_progress,
         created_at=lecture.created_at,
     )
+
+
+async def _get_redis_client() -> redis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_client
+
+
+async def _register_subscription(lecture_id: uuid.UUID, websocket: WebSocket) -> None:
+    async with _subscriptions_lock:
+        _subscriptions[lecture_id].add(websocket)
+
+
+async def _unregister_subscription(lecture_id: uuid.UUID, websocket: WebSocket) -> None:
+    async with _subscriptions_lock:
+        subscribers = _subscriptions.get(lecture_id)
+        if not subscribers:
+            return
+        subscribers.discard(websocket)
+        if not subscribers:
+            _subscriptions.pop(lecture_id, None)
+
+
+def _progress_payload(lecture_id: uuid.UUID, progress: int, status_value: str | None) -> dict[str, object]:
+    normalized_progress = max(0, min(100, int(progress)))
+    payload: dict[str, object] = {
+        "type": "lecture_progress",
+        "lecture_id": str(lecture_id),
+        "progress": normalized_progress,
+        "source": _INSTANCE_ID,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if status_value is not None:
+        payload["status"] = status_value
+    return payload
+
+
+async def _broadcast_local(lecture_id: uuid.UUID, payload: dict[str, object]) -> None:
+    async with _subscriptions_lock:
+        subscribers = list(_subscriptions.get(lecture_id, set()))
+    if not subscribers:
+        return
+
+    stale: list[WebSocket] = []
+    for websocket in subscribers:
+        try:
+            await websocket.send_json(payload)
+        except (RuntimeError, WebSocketDisconnect):
+            stale.append(websocket)
+        except Exception:
+            logger.exception("Failed to send progress via websocket for lecture_id=%s", lecture_id)
+            stale.append(websocket)
+
+    if stale:
+        async with _subscriptions_lock:
+            current = _subscriptions.get(lecture_id)
+            if current:
+                for websocket in stale:
+                    current.discard(websocket)
+                if not current:
+                    _subscriptions.pop(lecture_id, None)
+
+
+async def _publish_redis(payload: dict[str, object]) -> None:
+    try:
+        client = await _get_redis_client()
+        await client.publish(PROGRESS_CHANNEL, json.dumps(payload))
+    except Exception:
+        logger.exception(
+            "Failed to publish lecture progress to redis for lecture_id=%s",
+            payload.get("lecture_id"),
+        )
+
+
+async def broadcast_progress(
+    lecture_id: uuid.UUID,
+    progress: int,
+    status_value: str | None = None,
+) -> None:
+    payload = _progress_payload(lecture_id, progress, status_value)
+    await _broadcast_local(lecture_id, payload)
+    await _publish_redis(payload)
+
+
+def broadcast_progress_sync(
+    lecture_id: uuid.UUID,
+    progress: int,
+    status_value: str | None = None,
+) -> None:
+    asyncio.run(broadcast_progress(lecture_id, progress, status_value))
+
+
+async def _progress_listener_loop() -> None:
+    global _redis_pubsub
+    client = await _get_redis_client()
+    _redis_pubsub = client.pubsub(ignore_subscribe_messages=True)
+    await _redis_pubsub.subscribe(PROGRESS_CHANNEL)
+
+    try:
+        while True:
+            message = await _redis_pubsub.get_message(timeout=1.0)
+            if not message:
+                await asyncio.sleep(0.05)
+                continue
+
+            raw_data = message.get("data")
+            if not raw_data:
+                continue
+
+            try:
+                payload = json.loads(raw_data)
+            except json.JSONDecodeError:
+                logger.warning("Invalid progress payload received from redis")
+                continue
+
+            if str(payload.get("source", "")) == _INSTANCE_ID:
+                continue
+
+            raw_lecture_id = payload.get("lecture_id")
+            try:
+                lecture_id = uuid.UUID(str(raw_lecture_id))
+            except (ValueError, TypeError):
+                logger.warning("Invalid lecture_id in progress payload: %s", raw_lecture_id)
+                continue
+
+            await _broadcast_local(lecture_id, payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Lecture progress redis listener stopped unexpectedly")
+    finally:
+        if _redis_pubsub is not None:
+            close_fn = getattr(_redis_pubsub, "aclose", None) or _redis_pubsub.close
+            close_result = close_fn()
+            if asyncio.iscoroutine(close_result):
+                await close_result
+            _redis_pubsub = None
+
+
+async def start_progress_listener() -> None:
+    global _listener_task
+    async with _listener_lock:
+        if _listener_task and not _listener_task.done():
+            return
+        _listener_task = asyncio.create_task(_progress_listener_loop())
+
+
+async def stop_progress_listener() -> None:
+    global _listener_task, _redis_client
+    async with _listener_lock:
+        if _listener_task is not None:
+            _listener_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await _listener_task
+            _listener_task = None
+
+        if _redis_client is not None:
+            close_fn = getattr(_redis_client, "aclose", None) or _redis_client.close
+            close_result = close_fn()
+            if asyncio.iscoroutine(close_result):
+                await close_result
+            _redis_client = None
 
 
 def _parse_selected_entities(raw: str | None) -> list[str] | None:
@@ -155,6 +334,11 @@ async def create_lecture(
             payload.selected_entities,
         )
 
+    await broadcast_progress(
+        lecture.id,
+        lecture.processing_progress,
+        lecture.status.value if hasattr(lecture.status, "value") else str(lecture.status),
+    )
     return _to_lecture_response(lecture)
 
 
@@ -227,3 +411,20 @@ async def delete_lecture(
         logger.exception("Failed at media deletion stage for lecture_id=%s", lecture_id)
 
     return {"status": "deleted", "lecture_id": str(lecture_id)}
+
+
+@ws_router.websocket("/ws/{lecture_id}")
+async def lecture_progress_ws(websocket: WebSocket, lecture_id: uuid.UUID) -> None:
+    await websocket.accept()
+    await _register_subscription(lecture_id, websocket)
+    await websocket.send_json({"type": "subscribed", "lecture_id": str(lecture_id)})
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await _unregister_subscription(lecture_id, websocket)
