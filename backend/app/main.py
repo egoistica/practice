@@ -8,7 +8,14 @@ from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import admin_users_router, auth_router, lectures_router, lectures_ws_router
+from .api import (
+    admin_users_router,
+    auth_router,
+    favourites_router,
+    history_router,
+    lectures_router,
+    lectures_ws_router,
+)
 from .core.config import settings
 from .core.dependencies import get_celery_app
 from .services.progress_service import start_progress_listener, stop_progress_listener
@@ -38,6 +45,8 @@ def create_app() -> FastAPI:
     )
     app.include_router(auth_router)
     app.include_router(admin_users_router)
+    app.include_router(favourites_router)
+    app.include_router(history_router)
     app.include_router(lectures_router)
     app.include_router(lectures_ws_router)
 

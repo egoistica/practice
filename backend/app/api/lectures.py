@@ -20,6 +20,7 @@ from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureS
 from app.models.user import User
 from app.schemas.lecture import CreateLectureRequest, LectureListResponse, LectureResponse
 from app.services.file_service import delete_lecture_media, save_uploaded_file
+from app.services.history_service import record_history_visit
 from app.services.progress_service import (
     broadcast_progress,
     register_subscription,
@@ -296,6 +297,15 @@ async def get_lecture(
     lecture = await db.get(Lecture, lecture_id)
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
+
+    try:
+        history_updated = await record_history_visit(db, user.id, lecture.id)
+        if history_updated:
+            await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("Failed to record lecture history user_id=%s lecture_id=%s", user.id, lecture.id)
+
     return _to_lecture_response(lecture)
 
 
