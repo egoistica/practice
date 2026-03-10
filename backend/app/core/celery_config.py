@@ -6,7 +6,12 @@ from typing import Any
 
 
 def _resolve_include_modules() -> tuple[str, ...]:
-    candidates = ("backend.celery_app", "celery_app")
+    candidates = (
+        "backend.celery_app",
+        "celery_app",
+        "backend.app.tasks.process_lecture",
+        "app.tasks.process_lecture",
+    )
     resolved: list[str] = []
     for module_name in candidates:
         try:
