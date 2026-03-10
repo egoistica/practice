@@ -25,7 +25,12 @@ from app.services.video_service import download_video, extract_audio, get_video_
 logger = logging.getLogger(__name__)
 _NO_VALUE = object()
 SEGMENT_BLOCK_TYPE = "_segment"
-REALTIME_SEGMENT_SECONDS = max(15, int(os.getenv("REALTIME_SEGMENT_SECONDS", "60")))
+_raw_realtime_segment_seconds = os.getenv("REALTIME_SEGMENT_SECONDS")
+try:
+    _parsed_realtime_segment_seconds = int(_raw_realtime_segment_seconds) if _raw_realtime_segment_seconds is not None else 60
+except (TypeError, ValueError):
+    _parsed_realtime_segment_seconds = 60
+REALTIME_SEGMENT_SECONDS = max(15, _parsed_realtime_segment_seconds)
 
 
 def _parse_lecture_uuid(lecture_id: str | uuid.UUID) -> uuid.UUID:
@@ -482,12 +487,11 @@ def _has_usable_realtime_timestamps(segments: list[dict[str, Any]]) -> bool:
     normalized = _normalize_transcript_segments(segments)
     if not normalized:
         return False
-    for segment in normalized:
-        start = float(segment.get("start", 0.0))
-        end = float(segment.get("end", start))
-        if start > 0.0 or end > 0.0 or end > start:
-            return True
-    return False
+    return all(
+        float(segment.get("start", 0.0)) > 0.0
+        and float(segment.get("end", 0.0)) > float(segment.get("start", 0.0))
+        for segment in normalized
+    )
 
 
 def _build_chunk_summary_blocks(chunk: dict[str, Any]) -> list[dict[str, Any]]:
