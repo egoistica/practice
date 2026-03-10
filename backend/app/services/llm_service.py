@@ -34,6 +34,18 @@ ENTITY_SYSTEM_PROMPT = (
 )
 ALLOWED_BLOCK_TYPES = {"thought", "definition", "date", "conclusion"}
 DEFAULT_EDGE_LABEL = "related_to"
+RESERVED_COMPLETION_KWARGS = {
+    "messages",
+    "model",
+    "api_key",
+    "api_base",
+    "timeout",
+    "temperature",
+    "max_tokens",
+    "openai_api_key",
+    "anthropic_api_key",
+    "azure_api_key",
+}
 
 
 class LLMServiceError(RuntimeError):
@@ -75,7 +87,7 @@ def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[s
 
 def extract_entities(
     text: str,
-    selected_entities: Optional[list[str]] = None,
+    selected_entities: Optional[list[str] | str] = None,
     llm_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     if llm_config is None:
@@ -158,7 +170,12 @@ def _run_llm_completion(
 
     extra_kwargs = llm_config.get("completion_kwargs")
     if isinstance(extra_kwargs, dict):
-        request_kwargs.update(extra_kwargs)
+        safe_extra_kwargs = {
+            key: value
+            for key, value in extra_kwargs.items()
+            if str(key).strip().lower() not in RESERVED_COMPLETION_KWARGS
+        }
+        request_kwargs.update(safe_extra_kwargs)
 
     try:
         response = completion(**request_kwargs)
@@ -317,10 +334,19 @@ def _build_entity_prompt(selected_entities: list[str]) -> str:
     return f"{ENTITY_PROMPT_BASE} Если указаны нужные сущности [{focused}], фокусируйся на них."
 
 
-def _normalize_selected_entities(selected_entities: Optional[list[str]]) -> list[str]:
+def _normalize_selected_entities(selected_entities: Optional[list[str] | str]) -> list[str]:
     if not selected_entities:
         return []
-    normalized = [str(item).strip() for item in selected_entities if str(item).strip()]
+    values = [selected_entities] if isinstance(selected_entities, str) else list(selected_entities)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        candidate = _normalize_label_key(str(item))
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
     return normalized
 
 
@@ -337,25 +363,25 @@ def _normalize_nodes(nodes_raw: list[Any]) -> tuple[list[dict[str, Any]], dict[s
         if not label:
             continue
 
-        normalized_label = _normalize_label(label)
-        if not normalized_label:
+        dedupe_key = _normalize_label_key(label)
+        if not dedupe_key:
             continue
 
         raw_id = str(item.get("id", "")).strip()
         node_type = str(item.get("type", "")).strip().lower() or "term"
         mentions = _normalize_mentions(item.get("mentions"))
 
-        existing = dedup.get(normalized_label)
+        existing = dedup.get(dedupe_key)
         if existing is None:
-            node_id = _make_unique_id(raw_id or _slugify(normalized_label), used_ids)
+            node_id = _make_unique_id(raw_id or _slugify(label), used_ids)
             node = {
                 "id": node_id,
                 "label": label,
                 "type": node_type,
                 "mentions": mentions,
-                "_normalized_label": normalized_label,
+                "_dedupe_key": dedupe_key,
             }
-            dedup[normalized_label] = node
+            dedup[dedupe_key] = node
             existing = node
         else:
             if existing.get("type") == "term" and node_type != "term":
@@ -371,30 +397,30 @@ def _normalize_nodes(nodes_raw: list[Any]) -> tuple[list[dict[str, Any]], dict[s
         if label_ref:
             ref_map[label_ref] = canonical_id
 
-        normalized_label_ref = _normalize_ref(normalized_label)
+        normalized_label_ref = _normalize_ref(dedupe_key)
         if normalized_label_ref:
             ref_map[normalized_label_ref] = canonical_id
 
     nodes: list[dict[str, Any]] = []
     for node in dedup.values():
         clean = dict(node)
-        clean.pop("_normalized_label", None)
+        clean.pop("_dedupe_key", None)
         nodes.append(clean)
     return nodes, ref_map
 
 
 def _filter_nodes_by_selected(nodes: list[dict[str, Any]], selected_entities: list[str]) -> list[dict[str, Any]]:
-    selected_norm = [_normalize_label(item) for item in selected_entities if _normalize_label(item)]
+    selected_norm = {_normalize_label_key(item) for item in selected_entities if _normalize_label_key(item)}
     if not selected_norm:
         return nodes
 
     filtered: list[dict[str, Any]] = []
     for node in nodes:
-        node_label = _normalize_label(str(node.get("label", "")))
+        node_label = _normalize_label_key(str(node.get("label", "")))
         if not node_label:
             continue
 
-        if any(_match_selected(node_label, target) for target in selected_norm):
+        if node_label in selected_norm:
             filtered.append(node)
     return filtered
 
@@ -484,6 +510,10 @@ def _normalize_label(value: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _normalize_label_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value.lower()).strip()
+
+
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^\w-]", "-", value.lower())
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
@@ -503,12 +533,6 @@ def _make_unique_id(base_id: str, used_ids: set[str]) -> str:
             used_ids.add(next_candidate)
             return next_candidate
         suffix += 1
-
-
-def _match_selected(node_label: str, target: str) -> bool:
-    if not node_label or not target:
-        return False
-    return node_label == target or target in node_label or node_label in target
 
 
 def _resolve_timeout(raw_timeout: Any, default_timeout: float) -> float:
