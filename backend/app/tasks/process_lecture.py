@@ -488,7 +488,7 @@ def _has_usable_realtime_timestamps(segments: list[dict[str, Any]]) -> bool:
     if not normalized:
         return False
     return all(
-        float(segment.get("start", 0.0)) > 0.0
+        float(segment.get("start", 0.0)) >= 0.0
         and float(segment.get("end", 0.0)) > float(segment.get("start", 0.0))
         for segment in normalized
     )
@@ -628,7 +628,7 @@ def _run_standard_enrichment_from_transcript(
         lecture_uuid,
         status=LectureStatus.PROCESSING,
         progress=90,
-        realtime_mode=True,
+        realtime_mode=False,
         publish_progress=True,
     )
 
