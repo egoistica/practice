@@ -67,6 +67,7 @@ class _Segment:
     end: float
     text: str
     words: int
+    has_timestamps: bool
 
 
 @dataclass
@@ -95,7 +96,7 @@ def _normalize_segments(text: str, raw_segments: list[dict]) -> list[_Segment]:
         if not compact:
             return []
         words = _word_count(compact)
-        return [_Segment(start=0.0, end=0.0, text=compact, words=words)]
+        return [_Segment(start=0.0, end=0.0, text=compact, words=words, has_timestamps=False)]
 
     normalized: list[_Segment] = []
     for item in raw_segments:
@@ -106,12 +107,24 @@ def _normalize_segments(text: str, raw_segments: list[dict]) -> list[_Segment]:
         if not raw_text:
             continue
 
+        has_raw_start = item.get("start") is not None or item.get("timecode_start") is not None
+        has_raw_end = item.get("end") is not None or item.get("timecode_end") is not None
+        has_timestamps = bool(has_raw_start or has_raw_end)
+
         start = _to_float(item.get("start", item.get("timecode_start")), 0.0)
         end = _to_float(item.get("end", item.get("timecode_end")), start)
         if end < start:
             end = start
 
-        normalized.append(_Segment(start=start, end=end, text=raw_text, words=_word_count(raw_text)))
+        normalized.append(
+            _Segment(
+                start=start,
+                end=end,
+                text=raw_text,
+                words=_word_count(raw_text),
+                has_timestamps=has_timestamps,
+            )
+        )
 
     normalized.sort(key=lambda seg: (seg.start, seg.end))
     return normalized
@@ -186,10 +199,19 @@ def _split_by_topic_shift(
 
     for idx, distance in enumerate(distances):
         boundary_ok = _is_sentence_boundary(segments[idx].text) or distance >= (threshold + 0.07)
+        duration_gate_enabled = _duration_gate_enabled(segments[block_start : idx + 1])
         block_duration = max(segments[idx].end - segments[block_start].start, 0.0)
-        enough_context = block_words >= min_words and block_duration >= min_seconds
+        enough_context = block_words >= min_words and (
+            block_duration >= min_seconds or not duration_gate_enabled
+        )
+        projected_words = block_words + segments[idx + 1].words
+        force_soft_max_split = (
+            projected_words > SOFT_MAX_BLOCK_WORDS
+            and _is_sentence_boundary(segments[idx].text)
+            and block_words >= max(8, min_words // 2)
+        )
 
-        if distance >= threshold and boundary_ok and enough_context:
+        if force_soft_max_split or (distance >= threshold and boundary_ok and enough_context):
             blocks.append(_Block(block_start, idx))
             block_start = idx + 1
             block_words = segments[block_start].words
@@ -214,7 +236,9 @@ def _merge_small_blocks(
         for idx, block in enumerate(list(merged)):
             words = _block_word_count(block, segments)
             duration = _block_duration(block, segments)
-            if words >= min_words and duration >= min_seconds:
+            duration_gate_enabled = _duration_gate_enabled(segments[block.start_idx : block.end_idx + 1])
+            duration_ok = duration >= min_seconds or not duration_gate_enabled
+            if words >= min_words and duration_ok:
                 continue
 
             if idx == 0:
@@ -244,8 +268,9 @@ def _merge_similar_neighbors(
         right = merged[i + 1]
         similarity = _block_similarity(left, right, embeddings)
         combined_words = _block_word_count(left, segments) + _block_word_count(right, segments)
+        max_merge_words = min(MERGE_MAX_WORDS, SOFT_MAX_BLOCK_WORDS)
 
-        if similarity >= MERGE_SIMILARITY_THRESHOLD and combined_words <= MERGE_MAX_WORDS:
+        if similarity >= MERGE_SIMILARITY_THRESHOLD and combined_words <= max_merge_words:
             merged[i] = _Block(start_idx=left.start_idx, end_idx=right.end_idx)
             del merged[i + 1]
             if i > 0:
@@ -280,7 +305,10 @@ def _to_float(value: object, default: float) -> float:
     try:
         if value is None:
             return default
-        return float(value)
+        converted = float(value)
+        if not math.isfinite(converted):
+            return default
+        return converted
     except (TypeError, ValueError):
         return default
 
@@ -294,7 +322,8 @@ def _tokenize(text: str) -> list[str]:
             if part.strip(".,!?;:()[]{}\"'`")
         ]
         tokens = fallback
-    return [token for token in tokens if token not in STOPWORDS]
+    filtered = [token for token in tokens if token not in STOPWORDS]
+    return filtered or tokens
 
 
 def _word_count(text: str) -> int:
@@ -302,6 +331,10 @@ def _word_count(text: str) -> int:
     if regex_count:
         return regex_count
     return len([part for part in text.split() if part.strip()])
+
+
+def _duration_gate_enabled(segments: list[_Segment]) -> bool:
+    return all(segment.has_timestamps for segment in segments)
 
 
 def _hash_feature(feature: str) -> tuple[int, float]:
