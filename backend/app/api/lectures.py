@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select
@@ -26,6 +26,7 @@ from app.models.user import User
 from app.schemas.lecture import CreateLectureRequest, LectureListResponse, LectureResponse
 from app.services.file_service import delete_lecture_media, save_uploaded_file
 from app.services.history_service import record_history_visit
+from app.services.llm_service import LLMServiceError, enrich_graph
 from app.services.progress_service import (
     broadcast_progress,
     register_subscription,
@@ -314,6 +315,47 @@ async def get_lecture(
         logger.exception("Failed to record lecture history user_id=%s lecture_id=%s", user.id, lecture.id)
 
     return response
+
+
+@router.post("/{lecture_id}/graph/enrich", status_code=status.HTTP_200_OK)
+async def enrich_lecture_graph(
+    lecture_id: uuid.UUID,
+    llm_config: dict[str, Any] | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    lecture = await db.get(Lecture, lecture_id)
+    if lecture is None or lecture.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
+
+    graph = (
+        await db.execute(
+            select(EntityGraph).where(EntityGraph.lecture_id == lecture_id)
+        )
+    ).scalar_one_or_none()
+    if graph is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity graph not found")
+
+    try:
+        enriched_payload = enrich_graph(graph.nodes, graph.edges, llm_config)
+    except LLMServiceError:
+        logger.exception("Graph enrichment failed for lecture_id=%s user_id=%s", lecture_id, user.id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Graph enrichment failed",
+        ) from None
+
+    graph.nodes = list(enriched_payload.get("nodes", []))
+    graph.edges = list(enriched_payload.get("edges", []))
+    graph.enriched = True
+    await db.commit()
+    await db.refresh(graph)
+
+    return {
+        "nodes": graph.nodes,
+        "edges": graph.edges,
+        "enriched": graph.enriched,
+    }
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)

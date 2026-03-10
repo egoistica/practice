@@ -21,6 +21,11 @@ ENTITY_PROMPT_BASE = (
     "(timecode может быть null или отсутствовать, если тайминг неизвестен). "
     "и рёбрами {source, target, label}."
 )
+ENRICH_PROMPT_BASE = (
+    "Даны сущности и их связи. Добавь релевантные сущности и связи, которые логически связаны, "
+    "но не упомянуты в исходном тексте. Пометь новые узлы флагом 'enriched': true. "
+    "Верни расширенный JSON."
+)
 SYSTEM_PROMPT = (
     "Ты помощник по созданию конспектов лекций. Верни только валидный JSON без markdown. "
     "Точный формат: "
@@ -33,6 +38,14 @@ ENTITY_SYSTEM_PROMPT = (
     '{"nodes":[{"id":"...","label":"...","type":"...","mentions":[{"position_in_text":0,"timecode":0.0}]}],'
     '"edges":[{"source":"...","target":"...","label":"..."}]}.'
     "Если время упоминания неизвестно, указывай timecode: null или опускай поле timecode."
+)
+ENRICH_SYSTEM_PROMPT = (
+    "Ты расширяешь граф сущностей. Верни только валидный JSON без markdown. "
+    "Формат: "
+    '{"nodes":[{"id":"...","label":"...","type":"...","enriched":true,'
+    '"mentions":[{"position_in_text":0,"timecode":null}]}],'
+    '"edges":[{"source":"...","target":"...","label":"..."}]}.'
+    "Добавляй только новые релевантные узлы и связи; существующие не дублируй."
 )
 ALLOWED_BLOCK_TYPES = {"thought", "definition", "date", "conclusion"}
 DEFAULT_EDGE_LABEL = "related_to"
@@ -118,6 +131,40 @@ def extract_entities(
         default_timeout=90.0,
     )
     return _parse_entities_payload(raw_content, selected_clean)
+
+
+def enrich_graph(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    llm_config: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    if llm_config is None:
+        llm_config = {}
+    if not isinstance(llm_config, dict):
+        raise TypeError("llm_config must be a dict")
+    if not isinstance(nodes, list):
+        raise TypeError("nodes must be a list")
+    if not isinstance(edges, list):
+        raise TypeError("edges must be a list")
+
+    request_cfg = _resolve_request_config(llm_config)
+    user_prompt = str(llm_config.get("prompt") or ENRICH_PROMPT_BASE).strip()
+    graph_json = json.dumps({"nodes": nodes, "edges": edges}, ensure_ascii=False)
+
+    messages = [
+        {"role": "system", "content": ENRICH_SYSTEM_PROMPT},
+        {"role": "user", "content": f"{user_prompt}\n\nТекущий граф:\n{graph_json}"},
+    ]
+    raw_content = _run_llm_completion(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+        messages=messages,
+        default_temperature=0.2,
+        default_max_tokens=2000,
+        default_timeout=120.0,
+    )
+    payload = _parse_enrichment_payload(raw_content)
+    return _merge_graph_payload(nodes, edges, payload["nodes"], payload["edges"])
 
 
 def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]:
@@ -274,6 +321,21 @@ def _parse_entities_payload(raw_content: str, selected_entities: list[str]) -> d
     return {"nodes": nodes, "edges": edges}
 
 
+def _parse_enrichment_payload(raw_content: str) -> dict[str, list[Any]]:
+    payload = _load_json_payload(raw_content)
+    if not isinstance(payload, dict):
+        raise LLMResponseParseError("Enrichment response JSON must be an object")
+
+    nodes_raw = payload.get("nodes")
+    edges_raw = payload.get("edges")
+    if not isinstance(nodes_raw, list):
+        raise LLMResponseParseError("Enrichment response must contain 'nodes' as a list")
+    if not isinstance(edges_raw, list):
+        raise LLMResponseParseError("Enrichment response must contain 'edges' as a list")
+
+    return {"nodes": nodes_raw, "edges": edges_raw}
+
+
 def _load_json_payload(raw_content: str) -> Any:
     try:
         return json.loads(raw_content)
@@ -409,6 +471,122 @@ def _normalize_nodes(nodes_raw: list[Any]) -> tuple[list[dict[str, Any]], dict[s
         clean.pop("_dedupe_key", None)
         nodes.append(clean)
     return nodes, ref_map
+
+
+def _merge_graph_payload(
+    base_nodes_raw: list[dict[str, Any]],
+    base_edges_raw: list[dict[str, Any]],
+    new_nodes_raw: list[Any],
+    new_edges_raw: list[Any],
+) -> dict[str, Any]:
+    base_nodes, _ = _normalize_nodes(base_nodes_raw)
+    new_nodes, _ = _normalize_nodes(new_nodes_raw)
+
+    existing_enriched_flags = _extract_enriched_flags(base_nodes_raw)
+    merged_nodes: list[dict[str, Any]] = []
+    node_by_key: dict[str, dict[str, Any]] = {}
+    used_ids: set[str] = set()
+    ref_map: dict[str, str] = {}
+
+    for node in base_nodes:
+        key = _normalize_label_key(str(node.get("label", "")))
+        if not key:
+            continue
+        merged = _register_merged_node(
+            node=node,
+            enriched=bool(existing_enriched_flags.get(key, False)),
+            used_ids=used_ids,
+            ref_map=ref_map,
+            merged_nodes=merged_nodes,
+        )
+        node_by_key[key] = merged
+
+    for node in new_nodes:
+        key = _normalize_label_key(str(node.get("label", "")))
+        if not key:
+            continue
+        existing = node_by_key.get(key)
+        if existing is not None:
+            if existing.get("type") == "term" and node.get("type") != "term":
+                existing["type"] = node.get("type") or existing["type"]
+            existing["mentions"] = _merge_mentions(
+                list(existing.get("mentions", [])),
+                list(node.get("mentions", [])),
+            )
+            _add_ref_aliases(
+                ref_map,
+                str(existing["id"]),
+                [node.get("id"), node.get("label"), key],
+            )
+            continue
+
+        merged = _register_merged_node(
+            node=node,
+            enriched=True,
+            used_ids=used_ids,
+            ref_map=ref_map,
+            merged_nodes=merged_nodes,
+        )
+        node_by_key[key] = merged
+
+    allowed_ids = {str(node["id"]) for node in merged_nodes}
+    merged_edges = _normalize_edges([*base_edges_raw, *new_edges_raw], ref_map, allowed_ids)
+    return {"nodes": merged_nodes, "edges": merged_edges}
+
+
+def _register_merged_node(
+    node: dict[str, Any],
+    enriched: bool,
+    used_ids: set[str],
+    ref_map: dict[str, str],
+    merged_nodes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    label = str(node.get("label", "")).strip()
+    if not label:
+        raise LLMResponseParseError("Node label is required")
+
+    raw_id = str(node.get("id", "")).strip()
+    candidate_id = raw_id or _slugify(label)
+    if candidate_id in used_ids:
+        node_id = _make_unique_id(candidate_id, used_ids)
+    else:
+        used_ids.add(candidate_id)
+        node_id = candidate_id
+
+    normalized = {
+        "id": node_id,
+        "label": label,
+        "type": str(node.get("type", "")).strip().lower() or "term",
+        "mentions": _normalize_mentions(node.get("mentions")),
+        "enriched": enriched,
+    }
+    merged_nodes.append(normalized)
+    _add_ref_aliases(
+        ref_map,
+        str(node_id),
+        [raw_id, label, _normalize_label_key(label)],
+    )
+    return normalized
+
+
+def _extract_enriched_flags(nodes_raw: list[dict[str, Any]]) -> dict[str, bool]:
+    flags: dict[str, bool] = {}
+    for item in nodes_raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", "")).strip()
+        key = _normalize_label_key(label)
+        if not key:
+            continue
+        flags[key] = bool(item.get("enriched", False)) or flags.get(key, False)
+    return flags
+
+
+def _add_ref_aliases(ref_map: dict[str, str], canonical_id: str, aliases: list[Any]) -> None:
+    for alias in aliases:
+        alias_key = _normalize_ref(alias)
+        if alias_key:
+            ref_map[alias_key] = canonical_id
 
 
 def _filter_nodes_by_selected(nodes: list[dict[str, Any]], selected_entities: list[str]) -> list[dict[str, Any]]:
