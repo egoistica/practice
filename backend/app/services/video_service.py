@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from pathlib import Path
 from urllib.parse import urlparse
@@ -22,6 +23,7 @@ class VideoDownloadError(VideoServiceError):
 
 
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".m4v"}
+DEFAULT_ALLOWED_VIDEO_DOMAINS = ("youtube.com", "youtu.be", "vk.com", "vkvideo.ru")
 BLOCKED_METADATA_NETWORKS = (
     ipaddress.ip_network("169.254.169.254/32"),
     ipaddress.ip_network("fd00:ec2::254/128"),
@@ -42,11 +44,42 @@ def _validate_url(url: str) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("Invalid URL. Hostname is required")
+    if not _is_allowed_source_host(hostname):
+        raise ValueError("URL host is not allowed")
 
+    # Defense-in-depth only: DNS can change between validation and fetch.
+    # Production must additionally enforce egress firewall/proxy restrictions.
     for ip in _resolve_host_ips(hostname):
         if _is_blocked_target_ip(ip):
             raise ValueError("URL points to a restricted network address")
     return normalized
+
+
+def _normalized_domain(value: str) -> str:
+    return value.strip().lower().rstrip(".")
+
+
+def _allowed_video_domains() -> tuple[str, ...]:
+    raw = os.getenv("VIDEO_SOURCE_DOMAIN_ALLOWLIST", "")
+    if not raw.strip():
+        return DEFAULT_ALLOWED_VIDEO_DOMAINS
+
+    domains = tuple(
+        domain
+        for domain in (_normalized_domain(item) for item in raw.split(","))
+        if domain
+    )
+    return domains or DEFAULT_ALLOWED_VIDEO_DOMAINS
+
+
+def _is_allowed_source_host(hostname: str) -> bool:
+    host = _normalized_domain(hostname)
+    if not host:
+        return False
+    for domain in _allowed_video_domains():
+        if host == domain or host.endswith(f".{domain}"):
+            return True
+    return False
 
 
 def _resolve_host_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
