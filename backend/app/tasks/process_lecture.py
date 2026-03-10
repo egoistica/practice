@@ -28,6 +28,7 @@ from app.services.video_service import (
 
 logger = logging.getLogger(__name__)
 _NO_VALUE = object()
+SEGMENT_BLOCK_TYPE = "_segment"
 
 
 def _parse_lecture_uuid(lecture_id: str | uuid.UUID) -> uuid.UUID:
@@ -126,9 +127,16 @@ def _update_lecture_state(
             thumbnail_path=thumbnail_path,
         )
     )
-
     if publish_progress:
-        broadcast_progress_sync(lecture_uuid, current_progress, current_status.value)
+        try:
+            broadcast_progress_sync(lecture_uuid, current_progress, current_status.value)
+        except Exception:
+            logger.exception(
+                "Failed to broadcast lecture progress lecture_id=%s progress=%s status=%s",
+                lecture_uuid,
+                current_progress,
+                current_status.value,
+            )
     return current_status, current_progress
 
 
@@ -146,16 +154,141 @@ def _mark_lecture_error(lecture_uuid: uuid.UUID, exc: Exception, step: str) -> N
         logger.exception("Failed to persist lecture error state lecture_id=%s", lecture_uuid)
 
 
-def _ensure_payload(payload: dict[str, Any]) -> tuple[uuid.UUID, dict[str, Any]]:
-    if not isinstance(payload, dict):
-        raise TypeError("Task payload must be a dict")
-    lecture_uuid = _parse_lecture_uuid(payload.get("lecture_id"))
-    return lecture_uuid, payload
+async def _upsert_transcript_async(
+    lecture_uuid: uuid.UUID,
+    *,
+    segments: list[dict[str, Any]],
+    full_text: str,
+) -> None:
+    async with AsyncSessionLocal() as db:
+        transcript = (
+            await db.execute(select(Transcript).where(Transcript.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if transcript is None:
+            db.add(
+                Transcript(
+                    lecture_id=lecture_uuid,
+                    segments=segments,
+                    full_text=full_text,
+                )
+            )
+        else:
+            transcript.segments = segments
+            transcript.full_text = full_text
+        await db.commit()
+
+
+async def _get_transcript_async(lecture_uuid: uuid.UUID) -> tuple[list[dict[str, Any]], str]:
+    async with AsyncSessionLocal() as db:
+        transcript = (
+            await db.execute(select(Transcript).where(Transcript.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if transcript is None:
+            raise ValueError(f"Transcript not found for lecture: {lecture_uuid}")
+        return list(transcript.segments or []), str(transcript.full_text or "")
+
+
+async def _upsert_summary_async(
+    lecture_uuid: uuid.UUID,
+    *,
+    content: list[dict[str, Any]],
+    timecode_start: float | None,
+    timecode_end: float | None,
+) -> None:
+    async with AsyncSessionLocal() as db:
+        summary = (
+            await db.execute(select(Summary).where(Summary.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if summary is None:
+            db.add(
+                Summary(
+                    lecture_id=lecture_uuid,
+                    content=content,
+                    timecode_start=timecode_start,
+                    timecode_end=timecode_end,
+                )
+            )
+        else:
+            summary.content = content
+            summary.timecode_start = timecode_start
+            summary.timecode_end = timecode_end
+        await db.commit()
+
+
+async def _get_summary_content_async(lecture_uuid: uuid.UUID) -> list[dict[str, Any]]:
+    async with AsyncSessionLocal() as db:
+        summary = (
+            await db.execute(select(Summary).where(Summary.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if summary is None:
+            return []
+        return list(summary.content or [])
+
+
+async def _upsert_entity_graph_async(
+    lecture_uuid: uuid.UUID,
+    *,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> None:
+    async with AsyncSessionLocal() as db:
+        graph = (
+            await db.execute(select(EntityGraph).where(EntityGraph.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if graph is None:
+            db.add(
+                EntityGraph(
+                    lecture_id=lecture_uuid,
+                    nodes=nodes,
+                    edges=edges,
+                    enriched=False,
+                )
+            )
+        else:
+            graph.nodes = nodes
+            graph.edges = edges
+            graph.enriched = False
+        await db.commit()
+
+
+def _timecode_range(blocks: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    starts = [
+        float(block["timecode_start"])
+        for block in blocks
+        if isinstance(block, dict) and block.get("timecode_start") is not None
+    ]
+    ends = [
+        float(block["timecode_end"])
+        for block in blocks
+        if isinstance(block, dict) and block.get("timecode_end") is not None
+    ]
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
+def _segment_placeholders(segmented_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    placeholders: list[dict[str, Any]] = []
+    for block in segmented_blocks:
+        if not isinstance(block, dict):
+            continue
+        text = str(block.get("text", "")).strip()
+        if not text:
+            continue
+        placeholders.append(
+            {
+                "type": SEGMENT_BLOCK_TYPE,
+                "text": text,
+                "timecode_start": block.get("timecode_start"),
+                "timecode_end": block.get("timecode_end"),
+            }
+        )
+    return placeholders
 
 
 def _aggregate_summary_blocks(segmented_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for block in segmented_blocks:
+        if not isinstance(block, dict):
+            continue
         block_text = str(block.get("text", "")).strip()
         if not block_text:
             continue
@@ -166,87 +299,19 @@ def _aggregate_summary_blocks(segmented_blocks: list[dict[str, Any]]) -> list[di
         for item in summary_payload.get("blocks", []):
             if not isinstance(item, dict):
                 continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
             result.append(
                 {
                     "title": str(item.get("title", "")).strip() or "Блок",
-                    "text": str(item.get("text", "")).strip(),
+                    "text": text,
                     "type": str(item.get("type", "thought")).strip() or "thought",
                     "timecode_start": timecode_start,
                     "timecode_end": timecode_end,
                 }
             )
-    return [item for item in result if item["text"]]
-
-
-async def _save_results_async(
-    lecture_uuid: uuid.UUID,
-    *,
-    transcript_segments: list[dict[str, Any]],
-    transcript_full_text: str,
-    summary_blocks: list[dict[str, Any]],
-    summary_start: float | None,
-    summary_end: float | None,
-    entity_nodes: list[dict[str, Any]],
-    entity_edges: list[dict[str, Any]],
-) -> None:
-    async with AsyncSessionLocal() as db:
-        lecture = await db.get(Lecture, lecture_uuid)
-        if lecture is None:
-            raise ValueError(f"Lecture not found: {lecture_uuid}")
-
-        transcript = (
-            await db.execute(select(Transcript).where(Transcript.lecture_id == lecture_uuid))
-        ).scalar_one_or_none()
-        if transcript is None:
-            db.add(
-                Transcript(
-                    lecture_id=lecture_uuid,
-                    segments=transcript_segments,
-                    full_text=transcript_full_text,
-                )
-            )
-        else:
-            transcript.segments = transcript_segments
-            transcript.full_text = transcript_full_text
-
-        summary = (
-            await db.execute(select(Summary).where(Summary.lecture_id == lecture_uuid))
-        ).scalar_one_or_none()
-        if summary is None:
-            db.add(
-                Summary(
-                    lecture_id=lecture_uuid,
-                    content=summary_blocks,
-                    timecode_start=summary_start,
-                    timecode_end=summary_end,
-                )
-            )
-        else:
-            summary.content = summary_blocks
-            summary.timecode_start = summary_start
-            summary.timecode_end = summary_end
-
-        graph = (
-            await db.execute(select(EntityGraph).where(EntityGraph.lecture_id == lecture_uuid))
-        ).scalar_one_or_none()
-        if graph is None:
-            db.add(
-                EntityGraph(
-                    lecture_id=lecture_uuid,
-                    nodes=entity_nodes,
-                    edges=entity_edges,
-                    enriched=False,
-                )
-            )
-        else:
-            graph.nodes = entity_nodes
-            graph.edges = entity_edges
-            graph.enriched = False
-
-        lecture.status = LectureStatus.DONE
-        lecture.processing_progress = 100
-        lecture.error_message = None
-        await db.commit()
+    return result
 
 
 @shared_task(bind=True, name="lectures.process_lecture_chain")
@@ -260,7 +325,6 @@ def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | 
             error_message=None,
             publish_progress=True,
         )
-
         workflow = chain(
             download_video_task.s(str(lecture_uuid)),
             extract_audio_task.s(),
@@ -271,18 +335,14 @@ def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | 
             save_results_task.s(),
         )
         chain_result = workflow.apply_async()
-        return {
-            "lecture_id": str(lecture_uuid),
-            "chain_id": chain_result.id,
-            "status": "scheduled",
-        }
+        return {"lecture_id": str(lecture_uuid), "chain_id": chain_result.id, "status": "scheduled"}
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "process_lecture_chain")
         raise
 
 
 @shared_task(bind=True, name="lectures.download_video")
-def download_video_task(self, lecture_id: str) -> dict[str, Any]:
+def download_video_task(self, lecture_id: str) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
         lecture = _get_lecture_sync(lecture_uuid)
@@ -306,7 +366,7 @@ def download_video_task(self, lecture_id: str) -> dict[str, Any]:
                 duration=duration,
                 publish_progress=True,
             )
-            return {"lecture_id": str(lecture_uuid), "video_path": abs_video_path}
+            return str(lecture_uuid)
 
         abs_video_path = _to_abs_media_path(lecture_uuid, lecture.file_path)
         if not abs_video_path or not Path(abs_video_path).exists():
@@ -322,169 +382,168 @@ def download_video_task(self, lecture_id: str) -> dict[str, Any]:
             duration=duration,
             publish_progress=True,
         )
-        return {"lecture_id": str(lecture_uuid), "video_path": abs_video_path}
+        return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "download_video_task")
         raise
 
 
 @shared_task(bind=True, name="lectures.extract_audio")
-def extract_audio_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-    lecture_uuid, data = _ensure_payload(payload)
+def extract_audio_task(self, lecture_id: str) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        video_path = str(data.get("video_path", "")).strip()
+        lecture = _get_lecture_sync(lecture_uuid)
+        video_path = _to_abs_media_path(lecture_uuid, lecture.file_path)
         if not video_path:
-            raise ValueError("video_path is required")
-        audio_path = extract_audio(video_path, str(_lecture_dir(lecture_uuid) / "audio.wav"))
-        data["audio_path"] = audio_path
+            raise ValueError("Lecture video path is missing")
+        extract_audio(video_path, str(_lecture_dir(lecture_uuid) / "audio.wav"))
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
             progress=30,
             publish_progress=True,
         )
-        return data
+        return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "extract_audio_task")
         raise
 
 
 @shared_task(bind=True, name="lectures.transcribe")
-def transcribe_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-    lecture_uuid, data = _ensure_payload(payload)
+def transcribe_task(self, lecture_id: str) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        audio_path = str(data.get("audio_path", "")).strip()
-        if not audio_path:
-            raise ValueError("audio_path is required")
-        transcription = transcribe_audio(audio_path, language="ru")
+        audio_path = _lecture_dir(lecture_uuid) / "audio.wav"
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        transcription = transcribe_audio(str(audio_path), language="ru")
         segments = list(transcription.get("segments", []))
         full_text = str(transcription.get("full_text", "")).strip()
         if not full_text:
             raise ValueError("Transcription returned empty text")
 
-        data["transcript_segments"] = segments
-        data["transcript_full_text"] = full_text
+        asyncio.run(_upsert_transcript_async(lecture_uuid, segments=segments, full_text=full_text))
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
             progress=50,
             publish_progress=True,
         )
-        return data
+        return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "transcribe_task")
         raise
 
 
 @shared_task(bind=True, name="lectures.segment_text")
-def segment_text_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-    lecture_uuid, data = _ensure_payload(payload)
+def segment_text_task(self, lecture_id: str) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        full_text = str(data.get("transcript_full_text", "")).strip()
-        transcript_segments = data.get("transcript_segments") or []
-        if not full_text:
-            raise ValueError("transcript_full_text is required")
-        blocks = segment_text(full_text, transcript_segments)
-        data["segmented_blocks"] = blocks
+        transcript_segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+        segmented_blocks = segment_text(transcript_full_text, transcript_segments)
+        placeholders = _segment_placeholders(segmented_blocks)
+        summary_start, summary_end = _timecode_range(placeholders)
+        asyncio.run(
+            _upsert_summary_async(
+                lecture_uuid,
+                content=placeholders,
+                timecode_start=summary_start,
+                timecode_end=summary_end,
+            )
+        )
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
             progress=65,
             publish_progress=True,
         )
-        return data
+        return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "segment_text_task")
         raise
 
 
 @shared_task(bind=True, name="lectures.summarize")
-def summarize_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-    lecture_uuid, data = _ensure_payload(payload)
+def summarize_task(self, lecture_id: str) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        segmented_blocks = data.get("segmented_blocks") or []
+        summary_content = asyncio.run(_get_summary_content_async(lecture_uuid))
+        segmented_blocks = [
+            item for item in summary_content if isinstance(item, dict) and item.get("type") == SEGMENT_BLOCK_TYPE
+        ]
+
+        if not segmented_blocks:
+            transcript_segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+            segmented_blocks = segment_text(transcript_full_text, transcript_segments)
+
         summary_blocks = _aggregate_summary_blocks(segmented_blocks)
         if not summary_blocks:
-            fallback = summarize_segment(str(data.get("transcript_full_text", "")), llm_config={})
+            _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+            fallback = summarize_segment(transcript_full_text, llm_config={})
             summary_blocks = list(fallback.get("blocks", []))
 
-        timecodes = [item for item in segmented_blocks if isinstance(item, dict)]
-        summary_start = None
-        summary_end = None
-        if timecodes:
-            starts = [float(item["timecode_start"]) for item in timecodes if item.get("timecode_start") is not None]
-            ends = [float(item["timecode_end"]) for item in timecodes if item.get("timecode_end") is not None]
-            summary_start = min(starts) if starts else None
-            summary_end = max(ends) if ends else None
-
-        data["summary_blocks"] = summary_blocks
-        data["summary_start"] = summary_start
-        data["summary_end"] = summary_end
+        summary_start, summary_end = _timecode_range(summary_blocks)
+        asyncio.run(
+            _upsert_summary_async(
+                lecture_uuid,
+                content=summary_blocks,
+                timecode_start=summary_start,
+                timecode_end=summary_end,
+            )
+        )
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
             progress=80,
             publish_progress=True,
         )
-        return data
+        return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "summarize_task")
         raise
 
 
 @shared_task(bind=True, name="lectures.extract_entities")
-def extract_entities_task(
-    self,
-    payload: dict[str, Any],
-    selected_entities: list[str] | None = None,
-) -> dict[str, Any]:
-    lecture_uuid, data = _ensure_payload(payload)
+def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        text = str(data.get("transcript_full_text", "")).strip()
-        if not text:
-            raise ValueError("transcript_full_text is required")
-        entities_payload = extract_entities(text, selected_entities=selected_entities, llm_config={})
-        data["entity_nodes"] = list(entities_payload.get("nodes", []))
-        data["entity_edges"] = list(entities_payload.get("edges", []))
+        _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+        if not transcript_full_text:
+            raise ValueError("Transcript text is empty")
+
+        entities_payload = extract_entities(
+            transcript_full_text,
+            selected_entities=selected_entities,
+            llm_config={},
+        )
+        asyncio.run(
+            _upsert_entity_graph_async(
+                lecture_uuid,
+                nodes=list(entities_payload.get("nodes", [])),
+                edges=list(entities_payload.get("edges", [])),
+            )
+        )
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
             progress=90,
             publish_progress=True,
         )
-        return data
+        return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "extract_entities_task")
         raise
 
 
 @shared_task(bind=True, name="lectures.save_results")
-def save_results_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-    lecture_uuid, data = _ensure_payload(payload)
+def save_results_task(self, lecture_id: str) -> dict[str, Any]:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        transcript_segments = list(data.get("transcript_segments", []))
-        transcript_full_text = str(data.get("transcript_full_text", "")).strip()
-        summary_blocks = list(data.get("summary_blocks", []))
-        summary_start = data.get("summary_start")
-        summary_end = data.get("summary_end")
-        entity_nodes = list(data.get("entity_nodes", []))
-        entity_edges = list(data.get("entity_edges", []))
-
+        _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
         if not transcript_full_text:
             raise ValueError("transcript_full_text is required")
 
-        asyncio.run(
-            _save_results_async(
-                lecture_uuid,
-                transcript_segments=transcript_segments,
-                transcript_full_text=transcript_full_text,
-                summary_blocks=summary_blocks,
-                summary_start=summary_start,
-                summary_end=summary_end,
-                entity_nodes=entity_nodes,
-                entity_edges=entity_edges,
-            )
-        )
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.DONE,
@@ -496,3 +555,4 @@ def save_results_task(self, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "save_results_task")
         raise
+

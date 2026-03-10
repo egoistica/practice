@@ -268,10 +268,6 @@ async def create_lecture(
             lecture.status.value if hasattr(lecture.status, "value") else str(lecture.status),
         )
         logger.exception("Failed to enqueue lecture processing chain lecture_id=%s", lecture.id)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to schedule lecture processing",
-        ) from None
 
     return _to_lecture_response(lecture)
 
