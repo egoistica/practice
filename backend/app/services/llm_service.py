@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 from litellm import completion
 
@@ -29,7 +29,7 @@ class LLMResponseParseError(LLMServiceError):
     """Raised when LLM response cannot be parsed to expected summary JSON."""
 
 
-def summarize_segment(text: str, llm_config: dict[str, Any]) -> dict[str, Any]:
+def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[str, Any]:
     if llm_config is None:
         llm_config = {}
     if not isinstance(llm_config, dict):
@@ -52,6 +52,7 @@ def summarize_segment(text: str, llm_config: dict[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "temperature": float(llm_config.get("temperature", 0.2)),
         "max_tokens": int(llm_config.get("max_tokens", 1200)),
+        "timeout": _resolve_timeout(llm_config.get("timeout"), 60.0),
     }
     if request_cfg.get("api_base"):
         request_kwargs["api_base"] = request_cfg["api_base"]
@@ -221,3 +222,12 @@ def _default_title(block_type: str, index: int) -> str:
     base = mapping.get(block_type, "Блок")
     return f"{base} {index}"
 
+
+def _resolve_timeout(raw_timeout: Any, default_timeout: float) -> float:
+    try:
+        timeout = float(raw_timeout) if raw_timeout is not None else default_timeout
+    except (TypeError, ValueError):
+        return default_timeout
+    if timeout <= 0:
+        return default_timeout
+    return timeout
