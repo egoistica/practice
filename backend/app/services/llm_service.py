@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Optional
 
@@ -226,9 +227,9 @@ def _default_title(block_type: str, index: int) -> str:
 def _resolve_timeout(raw_timeout: Any, default_timeout: float) -> float:
     try:
         timeout = float(raw_timeout) if raw_timeout is not None else default_timeout
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default_timeout
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         return default_timeout
     return timeout
 
@@ -236,7 +237,9 @@ def _resolve_timeout(raw_timeout: Any, default_timeout: float) -> float:
 def _resolve_float(raw_value: Any, default_value: float) -> float:
     try:
         value = float(raw_value) if raw_value is not None else default_value
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return default_value
+    if not math.isfinite(value) or value < 0:
         return default_value
     return value
 
@@ -244,6 +247,8 @@ def _resolve_float(raw_value: Any, default_value: float) -> float:
 def _resolve_int(raw_value: Any, default_value: int) -> int:
     try:
         value = int(raw_value) if raw_value is not None else default_value
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return default_value
+    if not math.isfinite(float(value)) or value <= 0:
         return default_value
     return value
