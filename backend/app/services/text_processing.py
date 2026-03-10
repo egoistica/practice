@@ -9,6 +9,7 @@ from typing import Iterable
 
 TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+")
 SENTENCE_END_RE = re.compile(r"[.!?…]\s*$")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
 EMBEDDING_DIM = 384
 MIN_BLOCK_SECONDS = 35.0
@@ -91,42 +92,45 @@ def segment_text(text: str, segments: list[dict]) -> list[dict]:
 
 
 def _normalize_segments(text: str, raw_segments: list[dict]) -> list[_Segment]:
-    if not raw_segments:
-        compact = " ".join(part.strip() for part in text.splitlines() if part.strip())
-        if not compact:
-            return []
-        words = _word_count(compact)
-        return [_Segment(start=0.0, end=0.0, text=compact, words=words, has_timestamps=False)]
-
     normalized: list[_Segment] = []
-    for item in raw_segments:
-        if not isinstance(item, dict):
-            continue
 
-        raw_text = str(item.get("text", "")).strip()
-        if not raw_text:
-            continue
+    if not raw_segments:
+        normalized.extend(_build_pseudo_segments(text))
+    else:
+        for item in raw_segments:
+            if not isinstance(item, dict):
+                continue
 
-        has_raw_start = item.get("start") is not None or item.get("timecode_start") is not None
-        has_raw_end = item.get("end") is not None or item.get("timecode_end") is not None
-        has_timestamps = bool(has_raw_start or has_raw_end)
+            raw_text = str(item.get("text", "")).strip()
+            if not raw_text:
+                continue
 
-        start = _to_float(item.get("start", item.get("timecode_start")), 0.0)
-        end = _to_float(item.get("end", item.get("timecode_end")), start)
-        if end < start:
-            end = start
+            raw_start = item.get("start") if item.get("start") is not None else item.get("timecode_start")
+            raw_end = item.get("end") if item.get("end") is not None else item.get("timecode_end")
 
-        normalized.append(
-            _Segment(
-                start=start,
-                end=end,
-                text=raw_text,
-                words=_word_count(raw_text),
-                has_timestamps=has_timestamps,
+            has_timestamps = raw_start is not None or raw_end is not None
+            start = _to_float(raw_start, 0.0)
+            end = _to_float(raw_end, start)
+            if end < start:
+                end = start
+
+            normalized.append(
+                _Segment(
+                    start=start,
+                    end=end,
+                    text=raw_text,
+                    words=_word_count(raw_text),
+                    has_timestamps=has_timestamps,
+                )
             )
-        )
 
-    normalized.sort(key=lambda seg: (seg.start, seg.end))
+    normalized.sort(
+        key=lambda seg: (
+            0 if seg.has_timestamps else 1,
+            seg.start if seg.has_timestamps else 0.0,
+            seg.end if seg.has_timestamps else 0.0,
+        )
+    )
     return normalized
 
 
@@ -331,6 +335,33 @@ def _word_count(text: str) -> int:
     if regex_count:
         return regex_count
     return len([part for part in text.split() if part.strip()])
+
+
+def _build_pseudo_segments(text: str) -> list[_Segment]:
+    compact = " ".join(part.strip() for part in text.splitlines() if part.strip())
+    if not compact:
+        return []
+
+    segments: list[_Segment] = []
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()] or [compact]
+
+    for paragraph in paragraphs:
+        sentence_chunks = [chunk.strip() for chunk in SENTENCE_SPLIT_RE.split(paragraph) if chunk.strip()]
+        if not sentence_chunks:
+            sentence_chunks = [paragraph]
+
+        for chunk in sentence_chunks:
+            segments.append(
+                _Segment(
+                    start=0.0,
+                    end=0.0,
+                    text=chunk,
+                    words=_word_count(chunk),
+                    has_timestamps=False,
+                )
+            )
+
+    return segments
 
 
 def _duration_gate_enabled(segments: list[_Segment]) -> bool:
