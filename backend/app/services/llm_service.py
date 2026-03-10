@@ -50,8 +50,8 @@ def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[s
     request_kwargs: dict[str, Any] = {
         "model": request_cfg["model"],
         "messages": messages,
-        "temperature": float(llm_config.get("temperature", 0.2)),
-        "max_tokens": int(llm_config.get("max_tokens", 1200)),
+        "temperature": _resolve_float(llm_config.get("temperature"), 0.2),
+        "max_tokens": _resolve_int(llm_config.get("max_tokens"), 1200),
         "timeout": _resolve_timeout(llm_config.get("timeout"), 60.0),
     }
     if request_cfg.get("api_base"):
@@ -231,3 +231,19 @@ def _resolve_timeout(raw_timeout: Any, default_timeout: float) -> float:
     if timeout <= 0:
         return default_timeout
     return timeout
+
+
+def _resolve_float(raw_value: Any, default_value: float) -> float:
+    try:
+        value = float(raw_value) if raw_value is not None else default_value
+    except (TypeError, ValueError):
+        return default_value
+    return value
+
+
+def _resolve_int(raw_value: Any, default_value: int) -> int:
+    try:
+        value = int(raw_value) if raw_value is not None else default_value
+    except (TypeError, ValueError):
+        return default_value
+    return value
