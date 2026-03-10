@@ -40,18 +40,18 @@ def _validate_url(url: str) -> str:
     normalized = url.strip()
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Invalid URL. Use a full http(s) URL")
+        raise VideoDownloadError("Invalid URL. Use a full http(s) URL")
     hostname = parsed.hostname
     if not hostname:
-        raise ValueError("Invalid URL. Hostname is required")
+        raise VideoDownloadError("Invalid URL. Hostname is required")
     if not _is_allowed_source_host(hostname):
-        raise ValueError("URL host is not allowed")
+        raise VideoDownloadError("URL host is not allowed")
 
     # Defense-in-depth only: DNS can change between validation and fetch.
     # Production must additionally enforce egress firewall/proxy restrictions.
     for ip in _resolve_host_ips(hostname):
         if _is_blocked_target_ip(ip):
-            raise ValueError("URL points to a restricted network address")
+            raise VideoDownloadError("URL points to a restricted network address")
     return normalized
 
 
@@ -85,7 +85,7 @@ def _is_allowed_source_host(hostname: str) -> bool:
 def _resolve_host_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     normalized_host = hostname.strip().strip("[]")
     if not normalized_host:
-        raise ValueError("Invalid URL host")
+        raise VideoDownloadError("Invalid URL host")
 
     direct_host = normalized_host.split("%", 1)[0]
     try:
@@ -101,7 +101,7 @@ def _resolve_host_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IP
             type=socket.SOCK_STREAM,
         )
     except OSError as exc:
-        raise ValueError(f"Failed to resolve URL host: {normalized_host}") from exc
+        raise VideoDownloadError(f"Failed to resolve URL host: {normalized_host}") from exc
 
     ips: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
     for entry in resolved:
@@ -111,7 +111,7 @@ def _resolve_host_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IP
         except ValueError:
             continue
     if not ips:
-        raise ValueError(f"Could not resolve IP addresses for host: {normalized_host}")
+        raise VideoDownloadError(f"Could not resolve IP addresses for host: {normalized_host}")
     return ips
 
 
