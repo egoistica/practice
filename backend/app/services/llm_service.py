@@ -565,10 +565,28 @@ def _resolve_optional_float(raw_value: Any) -> Optional[float]:
 def _resolve_optional_non_negative_int(raw_value: Any) -> Optional[int]:
     if raw_value is None:
         return None
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError, OverflowError):
+
+    # Reject booleans explicitly: bool is a subclass of int.
+    if isinstance(raw_value, bool):
         return None
+
+    if isinstance(raw_value, int):
+        value = raw_value
+    elif isinstance(raw_value, float):
+        if not math.isfinite(raw_value) or not raw_value.is_integer():
+            return None
+        value = int(raw_value)
+    elif isinstance(raw_value, str):
+        candidate = raw_value.strip()
+        if not re.fullmatch(r"[+-]?\d+", candidate):
+            return None
+        try:
+            value = int(candidate)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    else:
+        return None
+
     if value < 0:
         return None
     return value
