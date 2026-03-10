@@ -466,14 +466,17 @@ def _normalize_mentions(raw_mentions: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
-        position = _resolve_int(item.get("position_in_text"), 0)
-        if position < 0:
-            position = 0
+        raw_position = item.get("position_in_text")
+        position = _resolve_optional_non_negative_int(raw_position)
+        if position is None:
+            continue
 
         raw_timecode = item.get("timecode")
         timecode: float | None = None
         if raw_timecode is not None:
-            timecode = round(_resolve_float(raw_timecode, 0.0), 3)
+            parsed_timecode = _resolve_optional_float(raw_timecode)
+            if parsed_timecode is not None and parsed_timecode >= 0:
+                timecode = round(parsed_timecode, 3)
 
         key = (position, timecode)
         if key in seen:
@@ -543,6 +546,30 @@ def _resolve_timeout(raw_timeout: Any, default_timeout: float) -> float:
     if not math.isfinite(timeout) or timeout <= 0:
         return default_timeout
     return timeout
+
+
+def _resolve_optional_float(raw_value: Any) -> Optional[float]:
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _resolve_optional_non_negative_int(raw_value: Any) -> Optional[int]:
+    if raw_value is None:
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if value < 0:
+        return None
+    return value
 
 
 def _resolve_float(raw_value: Any, default_value: float) -> float:
