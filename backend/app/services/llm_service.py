@@ -91,7 +91,7 @@ def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]
         if not api_base:
             api_base = settings.OLLAMA_BASE_URL
     elif provider == "openai":
-        if not api_key and settings.OPENAI_API_KEY.strip():
+        if not api_key and settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
             api_key = settings.OPENAI_API_KEY.strip()
     elif "/" not in model:
         model = f"{provider}/{model}"
