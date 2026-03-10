@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     TELEGRAM_BOT_TOKEN: str = ""
     LLM_PROVIDER: str = "openai"
+    LLM_MODEL: str = "gpt-4o-mini"
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
     MEDIA_ROOT: str = "/media"
 
     @property
@@ -125,6 +127,11 @@ class Settings(BaseSettings):
                 )
 
             llm_provider = str(getattr(self, "LLM_PROVIDER", "")).lower().strip()
+            llm_model = str(getattr(self, "LLM_MODEL", "")).strip()
+            if not llm_provider:
+                raise RuntimeError("LLM_PROVIDER must be set")
+            if not llm_model:
+                raise RuntimeError("LLM_MODEL must be set")
             if llm_provider == "openai":
                 openai_api_key = str(getattr(self, "OPENAI_API_KEY", ""))
                 if not openai_api_key.strip():
@@ -171,6 +178,8 @@ def get_settings() -> Settings:
             OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
             TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             LLM_PROVIDER=os.getenv("LLM_PROVIDER", "openai"),
+            LLM_MODEL=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             MEDIA_ROOT=os.getenv("MEDIA_ROOT", "/media"),
         )
 
