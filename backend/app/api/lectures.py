@@ -4,12 +4,13 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -23,9 +24,10 @@ from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureS
 from app.models.summary import Summary
 from app.models.transcript import Transcript
 from app.models.user import User
-from app.schemas.lecture import CreateLectureRequest, LectureListResponse, LectureResponse
+from app.schemas.lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 from app.services.file_service import delete_lecture_media, save_uploaded_file
 from app.services.history_service import record_history_visit
+from app.services.llm_service import LLMServiceError, enrich_graph, merge_graph_data
 from app.services.progress_service import (
     broadcast_progress,
     register_subscription,
@@ -314,6 +316,99 @@ async def get_lecture(
         logger.exception("Failed to record lecture history user_id=%s lecture_id=%s", user.id, lecture.id)
 
     return response
+
+
+@router.post("/{lecture_id}/graph/enrich", status_code=status.HTTP_200_OK)
+async def enrich_lecture_graph(
+    lecture_id: uuid.UUID,
+    llm_config: LLMRequestConfig | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    lecture = await db.get(Lecture, lecture_id)
+    if lecture is None or lecture.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
+
+    graph = (
+        await db.execute(
+            select(EntityGraph).where(EntityGraph.lecture_id == lecture_id)
+        )
+    ).scalar_one_or_none()
+    if graph is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity graph not found")
+
+    request_llm_config = llm_config.model_dump(exclude_none=True) if llm_config else {}
+    base_nodes = list(graph.nodes or [])
+    base_edges = list(graph.edges or [])
+
+    try:
+        enriched_payload = await asyncio.to_thread(enrich_graph, base_nodes, base_edges, request_llm_config)
+    except LLMServiceError:
+        logger.exception("Graph enrichment failed for lecture_id=%s user_id=%s", lecture_id, user.id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Graph enrichment failed",
+        ) from None
+
+    max_retries = 3
+    locked_graph: EntityGraph | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            locked_graph = (
+                await db.execute(
+                    select(EntityGraph)
+                    .where(EntityGraph.lecture_id == lecture_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if locked_graph is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity graph not found")
+
+            merged_payload = merge_graph_data(
+                list(locked_graph.nodes or []),
+                list(locked_graph.edges or []),
+                list(enriched_payload.get("nodes", [])),
+                list(enriched_payload.get("edges", [])),
+            )
+            locked_graph.nodes = list(merged_payload.get("nodes", []))
+            locked_graph.edges = list(merged_payload.get("edges", []))
+            locked_graph.enriched = True
+            await db.commit()
+            await db.refresh(locked_graph)
+            break
+        except HTTPException:
+            await db.rollback()
+            raise
+        except OperationalError:
+            await db.rollback()
+            if attempt == max_retries:
+                logger.exception(
+                    "Concurrent graph update conflict lecture_id=%s user_id=%s",
+                    lecture_id,
+                    user.id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Concurrent graph update conflict",
+                ) from None
+            await asyncio.sleep(0.1 * attempt)
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception(
+                "Failed to persist enriched graph lecture_id=%s user_id=%s",
+                lecture_id,
+                user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to persist enriched graph",
+            ) from None
+
+    return {
+        "nodes": locked_graph.nodes if locked_graph else [],
+        "edges": locked_graph.edges if locked_graph else [],
+        "enriched": bool(locked_graph.enriched) if locked_graph else False,
+    }
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)

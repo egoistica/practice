@@ -16,7 +16,7 @@ from .engagement import (
     HistoryLectureResponse,
     HistoryListResponse,
 )
-from .lecture import CreateLectureRequest, LectureListResponse, LectureResponse
+from .lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 
 __all__ = [
     "AdminAddTokensRequest",
@@ -31,6 +31,7 @@ __all__ = [
     "FavouritesListResponse",
     "HistoryLectureResponse",
     "HistoryListResponse",
+    "LLMRequestConfig",
     "LectureListResponse",
     "LectureResponse",
     "LoginRequest",
