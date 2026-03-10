@@ -17,7 +17,8 @@ SUMMARY_PROMPT = (
 ENTITY_PROMPT_BASE = (
     "Найди именованные сущности в тексте: термины, персоналии, теории. "
     "Для каждой сущности найди связи с другими сущностями. "
-    "Верни JSON с узлами {id, label, type, mentions:[{position_in_text, timecode}]} "
+    "Верни JSON с узлами {id, label, type, mentions:[{position_in_text, timecode?}]} "
+    "(timecode может быть null или отсутствовать, если тайминг неизвестен). "
     "и рёбрами {source, target, label}."
 )
 SYSTEM_PROMPT = (
@@ -31,6 +32,7 @@ ENTITY_SYSTEM_PROMPT = (
     "Формат: "
     '{"nodes":[{"id":"...","label":"...","type":"...","mentions":[{"position_in_text":0,"timecode":0.0}]}],'
     '"edges":[{"source":"...","target":"...","label":"..."}]}.'
+    "Если время упоминания неизвестно, указывай timecode: null или опускай поле timecode."
 )
 ALLOWED_BLOCK_TYPES = {"thought", "definition", "date", "conclusion"}
 DEFAULT_EDGE_LABEL = "related_to"
@@ -505,7 +507,7 @@ def _merge_mentions(base: list[dict[str, Any]], addition: list[dict[str, Any]]) 
 def _normalize_ref(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).strip().lower()
+    return _normalize_label_key(str(value))
 
 
 def _normalize_label(value: str) -> str:
