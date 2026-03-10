@@ -82,6 +82,35 @@ async def _reset_processing_artifacts_async(lecture_uuid: uuid.UUID) -> None:
         await db.commit()
 
 
+async def _claim_lecture_for_processing_async(lecture_uuid: uuid.UUID) -> tuple[bool, bool]:
+    async with AsyncSessionLocal() as db:
+        try:
+            lecture = (
+                await db.execute(
+                    select(Lecture)
+                    .where(Lecture.id == lecture_uuid)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if lecture is None:
+                raise ValueError(f"Lecture not found: {lecture_uuid}")
+
+            if lecture.status == LectureStatus.PROCESSING:
+                await db.rollback()
+                return False, _is_realtime_lecture(lecture)
+
+            is_realtime = _is_realtime_lecture(lecture)
+            lecture.status = LectureStatus.PROCESSING
+            lecture.processing_progress = 5
+            lecture.error_message = None
+            lecture.realtime_mode = is_realtime
+            await db.commit()
+            return True, is_realtime
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def _update_lecture_state_async(
     lecture_uuid: uuid.UUID,
     *,
@@ -449,6 +478,18 @@ def _build_realtime_chunks(
     return chunks
 
 
+def _has_usable_realtime_timestamps(segments: list[dict[str, Any]]) -> bool:
+    normalized = _normalize_transcript_segments(segments)
+    if not normalized:
+        return False
+    for segment in normalized:
+        start = float(segment.get("start", 0.0))
+        end = float(segment.get("end", start))
+        if start > 0.0 or end > 0.0 or end > start:
+            return True
+    return False
+
+
 def _build_chunk_summary_blocks(chunk: dict[str, Any]) -> list[dict[str, Any]]:
     chunk_text = str(chunk.get("text", "")).strip()
     if not chunk_text:
@@ -546,21 +587,93 @@ def _run_realtime_enrichment(
         )
 
 
+def _run_standard_enrichment_from_transcript(
+    lecture_uuid: uuid.UUID,
+    transcript_segments: list[dict[str, Any]],
+    full_text: str,
+    selected_entities: list[str] | None,
+) -> None:
+    segmented_blocks = segment_text(full_text, transcript_segments)
+    summary_blocks = _aggregate_summary_blocks(segmented_blocks)
+    if not summary_blocks:
+        fallback = summarize_segment(full_text, llm_config={})
+        summary_blocks = list(fallback.get("blocks", []))
+
+    summary_start, summary_end = _timecode_range(summary_blocks)
+    asyncio.run(
+        _upsert_summary_async(
+            lecture_uuid,
+            content=summary_blocks,
+            timecode_start=summary_start,
+            timecode_end=summary_end,
+        )
+    )
+    entities_payload = extract_entities(
+        full_text,
+        selected_entities=selected_entities,
+        llm_config={},
+    )
+    asyncio.run(
+        _upsert_entity_graph_async(
+            lecture_uuid,
+            nodes=list(entities_payload.get("nodes", [])),
+            edges=list(entities_payload.get("edges", [])),
+        )
+    )
+    _update_lecture_state(
+        lecture_uuid,
+        status=LectureStatus.PROCESSING,
+        progress=90,
+        realtime_mode=True,
+        publish_progress=True,
+    )
+
+    synthetic_timecode_start = 0.0
+    synthetic_timecode_end = max(float(summary_end or 0.0), 0.0)
+    _broadcast_realtime_event(
+        lecture_uuid,
+        "lecture_realtime_summary",
+        {
+            "chunk_index": 1,
+            "chunks_total": 1,
+            "timecode_start": synthetic_timecode_start,
+            "timecode_end": synthetic_timecode_end,
+            "blocks": summary_blocks,
+            "fallback": True,
+        },
+    )
+    _broadcast_realtime_event(
+        lecture_uuid,
+        "lecture_realtime_entities",
+        {
+            "chunk_index": 1,
+            "chunks_total": 1,
+            "timecode_start": synthetic_timecode_start,
+            "timecode_end": synthetic_timecode_end,
+            "nodes": list(entities_payload.get("nodes", [])),
+            "edges": list(entities_payload.get("edges", [])),
+            "graph_nodes_total": len(list(entities_payload.get("nodes", []))),
+            "graph_edges_total": len(list(entities_payload.get("edges", []))),
+            "fallback": True,
+        },
+    )
+
+
 @shared_task(bind=True, name="lectures.process_lecture_chain")
 def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | None = None) -> dict[str, Any]:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        lecture = _get_lecture_sync(lecture_uuid)
-        is_realtime = _is_realtime_lecture(lecture)
+        claimed, _is_realtime = asyncio.run(_claim_lecture_for_processing_async(lecture_uuid))
+        if not claimed:
+            logger.info("Lecture is already processing, skipping duplicate start lecture_id=%s", lecture_uuid)
+            return {"lecture_id": str(lecture_uuid), "status": "already_processing"}
+
+        try:
+            broadcast_progress_sync(lecture_uuid, 5, LectureStatus.PROCESSING.value)
+        except Exception:
+            logger.exception("Failed to broadcast claimed processing state lecture_id=%s", lecture_uuid)
+
         asyncio.run(_reset_processing_artifacts_async(lecture_uuid))
-        _update_lecture_state(
-            lecture_uuid,
-            status=LectureStatus.PROCESSING,
-            progress=5,
-            error_message=None,
-            realtime_mode=is_realtime,
-            publish_progress=True,
-        )
         workflow = chain(
             download_video_task.s(str(lecture_uuid)),
             extract_audio_task.s(),
@@ -669,7 +782,19 @@ def transcribe_task(self, lecture_id: str, selected_entities: list[str] | None =
         )
 
         if _is_realtime_lecture(lecture):
-            _run_realtime_enrichment(lecture_uuid, segments, selected_entities)
+            if _has_usable_realtime_timestamps(segments):
+                _run_realtime_enrichment(lecture_uuid, segments, selected_entities)
+            else:
+                logger.warning(
+                    "Realtime fallback to standard enrichment due to missing/invalid timestamps lecture_id=%s",
+                    lecture_uuid,
+                )
+                _run_standard_enrichment_from_transcript(
+                    lecture_uuid,
+                    segments,
+                    full_text,
+                    selected_entities,
+                )
 
         return str(lecture_uuid)
     except Exception as exc:
@@ -809,4 +934,3 @@ def save_results_task(self, lecture_id: str) -> dict[str, Any]:
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "save_results_task")
         raise
-
