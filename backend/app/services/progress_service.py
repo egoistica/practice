@@ -30,15 +30,20 @@ _redis_pubsub = None
 _listener_task: asyncio.Task[None] | None = None
 
 
-def _progress_payload(lecture_id: uuid.UUID, progress: int, status_value: str | None) -> dict[str, object]:
-    normalized_progress = max(0, min(100, int(progress)))
+def _base_payload(lecture_id: uuid.UUID, event_type: str) -> dict[str, object]:
     payload: dict[str, object] = {
-        "type": "lecture_progress",
+        "type": event_type,
         "lecture_id": str(lecture_id),
-        "progress": normalized_progress,
         "source": _INSTANCE_ID,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    return payload
+
+
+def _progress_payload(lecture_id: uuid.UUID, progress: int, status_value: str | None) -> dict[str, object]:
+    normalized_progress = max(0, min(100, int(progress)))
+    payload = _base_payload(lecture_id, "lecture_progress")
+    payload["progress"] = normalized_progress
     if status_value is not None:
         payload["status"] = status_value
     return payload
@@ -120,6 +125,28 @@ def broadcast_progress_sync(
     status_value: str | None = None,
 ) -> None:
     asyncio.run(broadcast_progress(lecture_id, progress, status_value))
+
+
+async def broadcast_lecture_event(
+    lecture_id: uuid.UUID,
+    event_type: str,
+    event_payload: dict[str, object],
+) -> None:
+    normalized_type = str(event_type).strip()
+    if not normalized_type:
+        raise ValueError("event_type must not be empty")
+    payload = _base_payload(lecture_id, normalized_type)
+    payload.update(event_payload)
+    await _broadcast_local(lecture_id, payload)
+    await _publish_redis(payload)
+
+
+def broadcast_lecture_event_sync(
+    lecture_id: uuid.UUID,
+    event_type: str,
+    event_payload: dict[str, object],
+) -> None:
+    asyncio.run(broadcast_lecture_event(lecture_id, event_type, event_payload))
 
 
 async def _close_redis_pubsub() -> None:

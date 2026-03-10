@@ -2,33 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 from celery import chain, shared_task
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.entity_graph import EntityGraph
-from app.models.lecture import Lecture, LectureSourceType, LectureStatus
+from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureStatus
 from app.models.summary import Summary
 from app.models.transcript import Transcript
-from app.services.llm_service import extract_entities, summarize_segment
-from app.services.progress_service import broadcast_progress_sync
+from app.services.llm_service import extract_entities, merge_graph_data, summarize_segment
+from app.services.progress_service import broadcast_lecture_event_sync, broadcast_progress_sync
 from app.services.text_processing import segment_text
 from app.services.transcription_service import transcribe_audio
-from app.services.video_service import (
-    download_video,
-    extract_audio,
-    get_video_duration,
-    get_video_thumbnail,
-)
+from app.services.video_service import download_video, extract_audio, get_video_duration, get_video_thumbnail
 
 logger = logging.getLogger(__name__)
 _NO_VALUE = object()
 SEGMENT_BLOCK_TYPE = "_segment"
+REALTIME_SEGMENT_SECONDS = max(15, int(os.getenv("REALTIME_SEGMENT_SECONDS", "60")))
 
 
 def _parse_lecture_uuid(lecture_id: str | uuid.UUID) -> uuid.UUID:
@@ -60,6 +57,11 @@ def _to_rel_media_path(lecture_uuid: uuid.UUID, abs_path: str | None) -> str | N
     return str(Path(str(lecture_uuid)) / path.name)
 
 
+def _is_realtime_lecture(lecture: Lecture) -> bool:
+    mode_value = lecture.mode.value if hasattr(lecture.mode, "value") else str(lecture.mode)
+    return str(mode_value).strip().lower() == LectureMode.REALTIME.value
+
+
 async def _get_lecture_async(lecture_uuid: uuid.UUID) -> Lecture:
     async with AsyncSessionLocal() as db:
         lecture = await db.get(Lecture, lecture_uuid)
@@ -72,6 +74,14 @@ def _get_lecture_sync(lecture_uuid: uuid.UUID) -> Lecture:
     return asyncio.run(_get_lecture_async(lecture_uuid))
 
 
+async def _reset_processing_artifacts_async(lecture_uuid: uuid.UUID) -> None:
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Transcript).where(Transcript.lecture_id == lecture_uuid))
+        await db.execute(delete(Summary).where(Summary.lecture_id == lecture_uuid))
+        await db.execute(delete(EntityGraph).where(EntityGraph.lecture_id == lecture_uuid))
+        await db.commit()
+
+
 async def _update_lecture_state_async(
     lecture_uuid: uuid.UUID,
     *,
@@ -81,6 +91,7 @@ async def _update_lecture_state_async(
     file_path: str | None = None,
     duration: float | None = None,
     thumbnail_path: str | None = None,
+    realtime_mode: bool | object = _NO_VALUE,
 ) -> tuple[LectureStatus, int]:
     async with AsyncSessionLocal() as db:
         lecture = await db.get(Lecture, lecture_uuid)
@@ -99,6 +110,8 @@ async def _update_lecture_state_async(
             lecture.duration = max(float(duration), 0.0)
         if thumbnail_path is not None:
             lecture.thumbnail_path = thumbnail_path
+        if realtime_mode is not _NO_VALUE:
+            lecture.realtime_mode = bool(realtime_mode)
 
         await db.commit()
         await db.refresh(lecture)
@@ -114,6 +127,7 @@ def _update_lecture_state(
     file_path: str | None = None,
     duration: float | None = None,
     thumbnail_path: str | None = None,
+    realtime_mode: bool | object = _NO_VALUE,
     publish_progress: bool = True,
 ) -> tuple[LectureStatus, int]:
     current_status, current_progress = asyncio.run(
@@ -125,6 +139,7 @@ def _update_lecture_state(
             file_path=file_path,
             duration=duration,
             thumbnail_path=thumbnail_path,
+            realtime_mode=realtime_mode,
         )
     )
     if publish_progress:
@@ -148,6 +163,7 @@ def _mark_lecture_error(lecture_uuid: uuid.UUID, exc: Exception, step: str) -> N
             lecture_uuid,
             status=LectureStatus.ERROR,
             error_message=message[:2000],
+            realtime_mode=False,
             publish_progress=True,
         )
     except Exception:
@@ -165,13 +181,7 @@ async def _upsert_transcript_async(
             await db.execute(select(Transcript).where(Transcript.lecture_id == lecture_uuid))
         ).scalar_one_or_none()
         if transcript is None:
-            db.add(
-                Transcript(
-                    lecture_id=lecture_uuid,
-                    segments=segments,
-                    full_text=full_text,
-                )
-            )
+            db.add(Transcript(lecture_id=lecture_uuid, segments=segments, full_text=full_text))
         else:
             transcript.segments = segments
             transcript.full_text = full_text
@@ -215,6 +225,35 @@ async def _upsert_summary_async(
         await db.commit()
 
 
+async def _append_summary_blocks_async(lecture_uuid: uuid.UUID, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not blocks:
+        return []
+    async with AsyncSessionLocal() as db:
+        summary = (
+            await db.execute(select(Summary).where(Summary.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if summary is None:
+            merged = list(blocks)
+            start, end = _timecode_range(merged)
+            db.add(
+                Summary(
+                    lecture_id=lecture_uuid,
+                    content=merged,
+                    timecode_start=start,
+                    timecode_end=end,
+                )
+            )
+        else:
+            existing = list(summary.content or [])
+            merged = [*existing, *blocks]
+            start, end = _timecode_range(merged)
+            summary.content = merged
+            summary.timecode_start = start
+            summary.timecode_end = end
+        await db.commit()
+        return merged
+
+
 async def _get_summary_content_async(lecture_uuid: uuid.UUID) -> list[dict[str, Any]]:
     async with AsyncSessionLocal() as db:
         summary = (
@@ -236,19 +275,48 @@ async def _upsert_entity_graph_async(
             await db.execute(select(EntityGraph).where(EntityGraph.lecture_id == lecture_uuid))
         ).scalar_one_or_none()
         if graph is None:
-            db.add(
-                EntityGraph(
-                    lecture_id=lecture_uuid,
-                    nodes=nodes,
-                    edges=edges,
-                    enriched=False,
-                )
-            )
+            db.add(EntityGraph(lecture_id=lecture_uuid, nodes=nodes, edges=edges, enriched=False))
         else:
             graph.nodes = nodes
             graph.edges = edges
             graph.enriched = False
         await db.commit()
+
+
+async def _merge_entity_graph_async(
+    lecture_uuid: uuid.UUID,
+    *,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async with AsyncSessionLocal() as db:
+        graph = (
+            await db.execute(select(EntityGraph).where(EntityGraph.lecture_id == lecture_uuid))
+        ).scalar_one_or_none()
+        if graph is None:
+            merged = merge_graph_data([], [], nodes, edges)
+            db.add(
+                EntityGraph(
+                    lecture_id=lecture_uuid,
+                    nodes=list(merged.get("nodes", [])),
+                    edges=list(merged.get("edges", [])),
+                    enriched=False,
+                )
+            )
+            await db.commit()
+            return list(merged.get("nodes", [])), list(merged.get("edges", []))
+
+        merged = merge_graph_data(
+            list(graph.nodes or []),
+            list(graph.edges or []),
+            nodes,
+            edges,
+        )
+        graph.nodes = list(merged.get("nodes", []))
+        graph.edges = list(merged.get("edges", []))
+        graph.enriched = False
+        await db.commit()
+        return list(graph.nodes or []), list(graph.edges or [])
 
 
 def _timecode_range(blocks: list[dict[str, Any]]) -> tuple[float | None, float | None]:
@@ -314,21 +382,189 @@ def _aggregate_summary_blocks(segmented_blocks: list[dict[str, Any]]) -> list[di
     return result
 
 
+def _normalize_transcript_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in segments:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        start_raw = item.get("start", item.get("timecode_start", 0.0))
+        end_raw = item.get("end", item.get("timecode_end", start_raw))
+        try:
+            start = max(float(start_raw), 0.0)
+        except (TypeError, ValueError):
+            start = 0.0
+        try:
+            end = float(end_raw)
+        except (TypeError, ValueError):
+            end = start
+        if end < start:
+            end = start
+        normalized.append({"start": start, "end": end, "text": text})
+    normalized.sort(key=lambda item: (item["start"], item["end"]))
+    return normalized
+
+
+def _build_realtime_chunks(
+    segments: list[dict[str, Any]],
+    window_seconds: int,
+) -> list[dict[str, Any]]:
+    normalized = _normalize_transcript_segments(segments)
+    if not normalized:
+        return []
+
+    chunks_raw: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for segment in normalized:
+        if not current:
+            current = [segment]
+            continue
+        current_start = float(current[0]["start"])
+        if float(segment["end"]) - current_start >= float(window_seconds):
+            chunks_raw.append(current)
+            current = [segment]
+        else:
+            current.append(segment)
+    if current:
+        chunks_raw.append(current)
+
+    chunks: list[dict[str, Any]] = []
+    for chunk in chunks_raw:
+        if not chunk:
+            continue
+        timecode_start = float(chunk[0]["start"])
+        timecode_end = float(chunk[-1]["end"])
+        chunk_text = " ".join(str(item.get("text", "")).strip() for item in chunk if str(item.get("text", "")).strip())
+        if not chunk_text:
+            continue
+        chunks.append(
+            {
+                "timecode_start": round(timecode_start, 3),
+                "timecode_end": round(timecode_end, 3),
+                "text": chunk_text,
+            }
+        )
+    return chunks
+
+
+def _build_chunk_summary_blocks(chunk: dict[str, Any]) -> list[dict[str, Any]]:
+    chunk_text = str(chunk.get("text", "")).strip()
+    if not chunk_text:
+        return []
+    summary_payload = summarize_segment(chunk_text, llm_config={})
+    blocks: list[dict[str, Any]] = []
+    for item in summary_payload.get("blocks", []):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        blocks.append(
+            {
+                "title": str(item.get("title", "")).strip() or "Блок",
+                "text": text,
+                "type": str(item.get("type", "thought")).strip() or "thought",
+                "timecode_start": chunk.get("timecode_start"),
+                "timecode_end": chunk.get("timecode_end"),
+            }
+        )
+    return blocks
+
+
+def _broadcast_realtime_event(lecture_uuid: uuid.UUID, event_type: str, payload: dict[str, object]) -> None:
+    try:
+        broadcast_lecture_event_sync(lecture_uuid, event_type, payload)
+    except Exception:
+        logger.exception(
+            "Failed to broadcast realtime event lecture_id=%s event=%s",
+            lecture_uuid,
+            event_type,
+        )
+
+
+def _run_realtime_enrichment(
+    lecture_uuid: uuid.UUID,
+    segments: list[dict[str, Any]],
+    selected_entities: list[str] | None,
+) -> None:
+    chunks = _build_realtime_chunks(segments, REALTIME_SEGMENT_SECONDS)
+    if not chunks:
+        return
+
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        summary_blocks = _build_chunk_summary_blocks(chunk)
+        asyncio.run(_append_summary_blocks_async(lecture_uuid, summary_blocks))
+        _broadcast_realtime_event(
+            lecture_uuid,
+            "lecture_realtime_summary",
+            {
+                "chunk_index": index,
+                "chunks_total": total,
+                "timecode_start": chunk.get("timecode_start"),
+                "timecode_end": chunk.get("timecode_end"),
+                "blocks": summary_blocks,
+            },
+        )
+
+        entities_payload = extract_entities(
+            str(chunk.get("text", "")),
+            selected_entities=selected_entities,
+            llm_config={},
+        )
+        merged_nodes, merged_edges = asyncio.run(
+            _merge_entity_graph_async(
+                lecture_uuid,
+                nodes=list(entities_payload.get("nodes", [])),
+                edges=list(entities_payload.get("edges", [])),
+            )
+        )
+        _broadcast_realtime_event(
+            lecture_uuid,
+            "lecture_realtime_entities",
+            {
+                "chunk_index": index,
+                "chunks_total": total,
+                "timecode_start": chunk.get("timecode_start"),
+                "timecode_end": chunk.get("timecode_end"),
+                "nodes": list(entities_payload.get("nodes", [])),
+                "edges": list(entities_payload.get("edges", [])),
+                "graph_nodes_total": len(merged_nodes),
+                "graph_edges_total": len(merged_edges),
+            },
+        )
+
+        progress = min(90, 50 + int((index / total) * 40))
+        _update_lecture_state(
+            lecture_uuid,
+            status=LectureStatus.PROCESSING,
+            progress=progress,
+            realtime_mode=True,
+            publish_progress=True,
+        )
+
+
 @shared_task(bind=True, name="lectures.process_lecture_chain")
 def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | None = None) -> dict[str, Any]:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
+        lecture = _get_lecture_sync(lecture_uuid)
+        is_realtime = _is_realtime_lecture(lecture)
+        asyncio.run(_reset_processing_artifacts_async(lecture_uuid))
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
             progress=5,
             error_message=None,
+            realtime_mode=is_realtime,
             publish_progress=True,
         )
         workflow = chain(
             download_video_task.s(str(lecture_uuid)),
             extract_audio_task.s(),
-            transcribe_task.s(),
+            transcribe_task.s(selected_entities),
             segment_text_task.s(),
             summarize_task.s(),
             extract_entities_task.s(selected_entities),
@@ -410,9 +646,10 @@ def extract_audio_task(self, lecture_id: str) -> str:
 
 
 @shared_task(bind=True, name="lectures.transcribe")
-def transcribe_task(self, lecture_id: str) -> str:
+def transcribe_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
+        lecture = _get_lecture_sync(lecture_uuid)
         audio_path = _lecture_dir(lecture_uuid) / "audio.wav"
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -430,6 +667,10 @@ def transcribe_task(self, lecture_id: str) -> str:
             progress=50,
             publish_progress=True,
         )
+
+        if _is_realtime_lecture(lecture):
+            _run_realtime_enrichment(lecture_uuid, segments, selected_entities)
+
         return str(lecture_uuid)
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "transcribe_task")
@@ -440,6 +681,10 @@ def transcribe_task(self, lecture_id: str) -> str:
 def segment_text_task(self, lecture_id: str) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
+        lecture = _get_lecture_sync(lecture_uuid)
+        if _is_realtime_lecture(lecture):
+            return str(lecture_uuid)
+
         transcript_segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
         segmented_blocks = segment_text(transcript_full_text, transcript_segments)
         placeholders = _segment_placeholders(segmented_blocks)
@@ -468,6 +713,10 @@ def segment_text_task(self, lecture_id: str) -> str:
 def summarize_task(self, lecture_id: str) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
+        lecture = _get_lecture_sync(lecture_uuid)
+        if _is_realtime_lecture(lecture):
+            return str(lecture_uuid)
+
         summary_content = asyncio.run(_get_summary_content_async(lecture_uuid))
         segmented_blocks = [
             item for item in summary_content if isinstance(item, dict) and item.get("type") == SEGMENT_BLOCK_TYPE
@@ -508,6 +757,10 @@ def summarize_task(self, lecture_id: str) -> str:
 def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
+        lecture = _get_lecture_sync(lecture_uuid)
+        if _is_realtime_lecture(lecture):
+            return str(lecture_uuid)
+
         _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
         if not transcript_full_text:
             raise ValueError("Transcript text is empty")
@@ -549,6 +802,7 @@ def save_results_task(self, lecture_id: str) -> dict[str, Any]:
             status=LectureStatus.DONE,
             progress=100,
             error_message=None,
+            realtime_mode=False,
             publish_progress=True,
         )
         return {"lecture_id": str(lecture_uuid), "status": "done"}
