@@ -518,6 +518,30 @@ def _build_chunk_summary_blocks(chunk: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _build_fallback_summary_blocks(
+    source_text: str,
+    *,
+    timecode_start: float | None,
+    timecode_end: float | None,
+) -> list[dict[str, Any]]:
+    normalized = " ".join(str(source_text or "").split())
+    fallback_text = normalized[:300].rstrip()
+    if normalized and len(normalized) > 300:
+        fallback_text = f"{fallback_text}..."
+    if not fallback_text:
+        fallback_text = "Summary is temporarily unavailable for this fragment."
+
+    return [
+        {
+            "title": "Fallback summary",
+            "text": fallback_text,
+            "type": "thought",
+            "timecode_start": timecode_start,
+            "timecode_end": timecode_end,
+        }
+    ]
+
+
 def _broadcast_realtime_event(lecture_uuid: uuid.UUID, event_type: str, payload: dict[str, object]) -> None:
     try:
         broadcast_lecture_event_sync(lecture_uuid, event_type, payload)
@@ -541,6 +565,18 @@ def _run_realtime_enrichment(
     total = len(chunks)
     for index, chunk in enumerate(chunks, start=1):
         summary_blocks = _build_chunk_summary_blocks(chunk)
+        if not summary_blocks:
+            logger.warning(
+                "Empty realtime summary blocks, using fallback lecture_id=%s chunk=%s/%s",
+                lecture_uuid,
+                index,
+                total,
+            )
+            summary_blocks = _build_fallback_summary_blocks(
+                str(chunk.get("text", "")),
+                timecode_start=chunk.get("timecode_start"),
+                timecode_end=chunk.get("timecode_end"),
+            )
         asyncio.run(_append_summary_blocks_async(lecture_uuid, summary_blocks))
         _broadcast_realtime_event(
             lecture_uuid,
@@ -602,6 +638,15 @@ def _run_standard_enrichment_from_transcript(
     if not summary_blocks:
         fallback = summarize_segment(full_text, llm_config={})
         summary_blocks = list(fallback.get("blocks", []))
+    if not summary_blocks:
+        normalized_segments = _normalize_transcript_segments(transcript_segments)
+        fallback_end = float(normalized_segments[-1].get("end", 0.0)) if normalized_segments else None
+        logger.warning("Empty summary blocks after fallback, using placeholder lecture_id=%s", lecture_uuid)
+        summary_blocks = _build_fallback_summary_blocks(
+            full_text,
+            timecode_start=0.0,
+            timecode_end=fallback_end,
+        )
 
     summary_start, summary_end = _timecode_range(summary_blocks)
     asyncio.run(
@@ -860,6 +905,16 @@ def summarize_task(self, lecture_id: str) -> str:
             _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
             fallback = summarize_segment(transcript_full_text, llm_config={})
             summary_blocks = list(fallback.get("blocks", []))
+        if not summary_blocks:
+            logger.warning(
+                "Empty summary blocks in summarize_task after fallback, using placeholder lecture_id=%s",
+                lecture_uuid,
+            )
+            summary_blocks = _build_fallback_summary_blocks(
+                transcript_full_text,
+                timecode_start=0.0,
+                timecode_end=None,
+            )
 
         summary_start, summary_end = _timecode_range(summary_blocks)
         asyncio.run(
