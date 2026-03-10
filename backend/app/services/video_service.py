@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
+import os
+import socket
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,6 +23,11 @@ class VideoDownloadError(VideoServiceError):
 
 
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".m4v"}
+DEFAULT_ALLOWED_VIDEO_DOMAINS = ("youtube.com", "youtu.be", "vk.com", "vkvideo.ru")
+BLOCKED_METADATA_NETWORKS = (
+    ipaddress.ip_network("169.254.169.254/32"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
+)
 
 
 def _decode_ffmpeg_error(exc: ffmpeg.Error) -> str:
@@ -32,8 +40,85 @@ def _validate_url(url: str) -> str:
     normalized = url.strip()
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Invalid URL. Use a full http(s) URL")
+        raise VideoDownloadError("Invalid URL. Use a full http(s) URL")
+    hostname = parsed.hostname
+    if not hostname:
+        raise VideoDownloadError("Invalid URL. Hostname is required")
+    if not _is_allowed_source_host(hostname):
+        raise VideoDownloadError("URL host is not allowed")
+
+    # Defense-in-depth only: DNS can change between validation and fetch.
+    # Production must additionally enforce egress firewall/proxy restrictions.
+    for ip in _resolve_host_ips(hostname):
+        if _is_blocked_target_ip(ip):
+            raise VideoDownloadError("URL points to a restricted network address")
     return normalized
+
+
+def _normalized_domain(value: str) -> str:
+    return value.strip().lower().rstrip(".")
+
+
+def _allowed_video_domains() -> tuple[str, ...]:
+    raw = os.getenv("VIDEO_SOURCE_DOMAIN_ALLOWLIST", "")
+    if not raw.strip():
+        return DEFAULT_ALLOWED_VIDEO_DOMAINS
+
+    domains = tuple(
+        domain
+        for domain in (_normalized_domain(item) for item in raw.split(","))
+        if domain
+    )
+    return domains or DEFAULT_ALLOWED_VIDEO_DOMAINS
+
+
+def _is_allowed_source_host(hostname: str) -> bool:
+    host = _normalized_domain(hostname)
+    if not host:
+        return False
+    for domain in _allowed_video_domains():
+        if host == domain or host.endswith(f".{domain}"):
+            return True
+    return False
+
+
+def _resolve_host_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    normalized_host = hostname.strip().strip("[]")
+    if not normalized_host:
+        raise VideoDownloadError("Invalid URL host")
+
+    direct_host = normalized_host.split("%", 1)[0]
+    try:
+        return {ipaddress.ip_address(direct_host)}
+    except ValueError:
+        pass
+
+    try:
+        resolved = socket.getaddrinfo(
+            normalized_host,
+            None,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise VideoDownloadError(f"Failed to resolve URL host: {normalized_host}") from exc
+
+    ips: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for entry in resolved:
+        raw_ip = str(entry[4][0]).split("%", 1)[0]
+        try:
+            ips.add(ipaddress.ip_address(raw_ip))
+        except ValueError:
+            continue
+    if not ips:
+        raise VideoDownloadError(f"Could not resolve IP addresses for host: {normalized_host}")
+    return ips
+
+
+def _is_blocked_target_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return True
+    return any(ip in network for network in BLOCKED_METADATA_NETWORKS)
 
 
 def _validate_video_path(video_path: str) -> Path:
@@ -75,6 +160,7 @@ def download_video(url: str, output_path: str) -> str:
         "restrictfilenames": True,
         "quiet": True,
         "no_warnings": True,
+        "allowed_extractors": ["default", "-generic"],
     }
 
     try:
@@ -168,4 +254,3 @@ def get_video_thumbnail(video_path: str, output_path: str) -> str:
         raise VideoServiceError(f"Failed to create thumbnail: {_decode_ffmpeg_error(exc)}") from exc
 
     return str(output_file)
-
