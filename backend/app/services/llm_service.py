@@ -56,6 +56,7 @@ RESERVED_COMPLETION_KWARGS = {
     "api_base",
     "timeout",
     "temperature",
+    "top_p",
     "max_tokens",
     "openai_api_key",
     "anthropic_api_key",
@@ -229,6 +230,9 @@ def _run_llm_completion(
         "max_tokens": _resolve_int(llm_config.get("max_tokens"), default_max_tokens),
         "timeout": _resolve_timeout(llm_config.get("timeout"), default_timeout),
     }
+    raw_top_p = llm_config.get("top_p")
+    if raw_top_p is not None:
+        request_kwargs["top_p"] = _resolve_top_p(raw_top_p, 1.0)
     if request_cfg.get("api_base"):
         request_kwargs["api_base"] = request_cfg["api_base"]
     if request_cfg.get("api_key"):
@@ -833,5 +837,15 @@ def _resolve_int(raw_value: Any, default_value: int) -> int:
     except (TypeError, ValueError, OverflowError):
         return default_value
     if not math.isfinite(float(value)) or value <= 0:
+        return default_value
+    return value
+
+
+def _resolve_top_p(raw_value: Any, default_value: float) -> float:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return default_value
+    if not math.isfinite(value) or value <= 0 or value > 1:
         return default_value
     return value
