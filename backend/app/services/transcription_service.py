@@ -44,6 +44,12 @@ def _validate_audio_path(audio_path: str) -> Path:
             f"Unsupported audio format: {source.suffix or '<none>'}. "
             "Supported: wav, mp3, m4a, ogg, flac, aac, webm"
         )
+
+    try:
+        with source.open("rb"):
+            pass
+    except OSError as exc:
+        raise AudioDecodingError(f"Audio file is unreadable: {source}. Details: {exc}") from exc
     return source
 
 
@@ -70,26 +76,35 @@ def _get_whisper_model() -> Any:
             "Use the backend Docker container or Linux environment with dependencies."
         ) from exc
 
-    Path(WHISPER_DOWNLOAD_ROOT).mkdir(parents=True, exist_ok=True)
     try:
+        Path(WHISPER_DOWNLOAD_ROOT).mkdir(parents=True, exist_ok=True)
         return WhisperModel(
             WHISPER_MODEL_SIZE,
             device=WHISPER_DEVICE,
             compute_type=WHISPER_COMPUTE_TYPE,
             download_root=WHISPER_DOWNLOAD_ROOT,
         )
+    except OSError as exc:
+        raise TranscriptionServiceError(
+            "Failed to prepare Whisper cache directory. "
+            f"download_root={WHISPER_DOWNLOAD_ROOT}, size={WHISPER_MODEL_SIZE}, "
+            f"device={WHISPER_DEVICE}, compute_type={WHISPER_COMPUTE_TYPE}. "
+            f"Details: {exc}"
+        ) from exc
     except Exception as exc:  # pragma: no cover - depends on runtime/hardware
         raise TranscriptionServiceError(
             "Failed to initialize Whisper model. "
-            f"Check model/device settings: size={WHISPER_MODEL_SIZE}, "
-            f"device={WHISPER_DEVICE}, compute_type={WHISPER_COMPUTE_TYPE}"
+            f"Check model/device settings: download_root={WHISPER_DOWNLOAD_ROOT}, "
+            f"size={WHISPER_MODEL_SIZE}, device={WHISPER_DEVICE}, "
+            f"compute_type={WHISPER_COMPUTE_TYPE}"
         ) from exc
 
 
 def transcribe_audio(audio_path: str, language: str = "ru") -> dict[str, Any]:
     source = _validate_audio_path(audio_path)
     model = _get_whisper_model()
-    normalized_language = language.strip().lower() if language else "ru"
+    stripped_language = language.strip() if language is not None else ""
+    normalized_language = stripped_language.lower() if stripped_language else "ru"
 
     try:
         segments_iter, _info = model.transcribe(
@@ -126,4 +141,3 @@ def transcribe_audio(audio_path: str, language: str = "ru") -> dict[str, Any]:
                 "Unable to decode audio file. File may be corrupted or format is unsupported."
             ) from exc
         raise TranscriptionServiceError("Failed to transcribe audio") from exc
-
