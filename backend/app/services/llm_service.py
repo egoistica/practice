@@ -164,7 +164,24 @@ def enrich_graph(
         default_timeout=120.0,
     )
     payload = _parse_enrichment_payload(raw_content)
-    return _merge_graph_payload(nodes, edges, payload["nodes"], payload["edges"])
+    return merge_graph_data(nodes, edges, payload["nodes"], payload["edges"])
+
+
+def merge_graph_data(
+    base_nodes: list[dict[str, Any]],
+    base_edges: list[dict[str, Any]],
+    incoming_nodes: list[Any],
+    incoming_edges: list[Any],
+) -> dict[str, Any]:
+    if not isinstance(base_nodes, list):
+        raise TypeError("base_nodes must be a list")
+    if not isinstance(base_edges, list):
+        raise TypeError("base_edges must be a list")
+    if not isinstance(incoming_nodes, list):
+        raise TypeError("incoming_nodes must be a list")
+    if not isinstance(incoming_edges, list):
+        raise TypeError("incoming_edges must be a list")
+    return _merge_graph_payload(base_nodes, base_edges, incoming_nodes, incoming_edges)
 
 
 def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]:
@@ -479,8 +496,8 @@ def _merge_graph_payload(
     new_nodes_raw: list[Any],
     new_edges_raw: list[Any],
 ) -> dict[str, Any]:
-    base_nodes, _ = _normalize_nodes(base_nodes_raw)
-    new_nodes, _ = _normalize_nodes(new_nodes_raw)
+    base_nodes, base_ref_map = _normalize_nodes(base_nodes_raw)
+    new_nodes, new_ref_map = _normalize_nodes(new_nodes_raw)
 
     existing_enriched_flags = _extract_enriched_flags(base_nodes_raw)
     merged_nodes: list[dict[str, Any]] = []
@@ -495,9 +512,16 @@ def _merge_graph_payload(
         merged = _register_merged_node(
             node=node,
             enriched=bool(existing_enriched_flags.get(key, False)),
+            preserve_mentions=True,
             used_ids=used_ids,
             ref_map=ref_map,
             merged_nodes=merged_nodes,
+        )
+        _add_aliases_from_ref_map(
+            target_ref_map=ref_map,
+            source_ref_map=base_ref_map,
+            source_canonical_id=str(node.get("id", "")),
+            target_canonical_id=str(merged["id"]),
         )
         node_by_key[key] = merged
 
@@ -509,23 +533,32 @@ def _merge_graph_payload(
         if existing is not None:
             if existing.get("type") == "term" and node.get("type") != "term":
                 existing["type"] = node.get("type") or existing["type"]
-            existing["mentions"] = _merge_mentions(
-                list(existing.get("mentions", [])),
-                list(node.get("mentions", [])),
-            )
             _add_ref_aliases(
                 ref_map,
                 str(existing["id"]),
                 [node.get("id"), node.get("label"), key],
+            )
+            _add_aliases_from_ref_map(
+                target_ref_map=ref_map,
+                source_ref_map=new_ref_map,
+                source_canonical_id=str(node.get("id", "")),
+                target_canonical_id=str(existing["id"]),
             )
             continue
 
         merged = _register_merged_node(
             node=node,
             enriched=True,
+            preserve_mentions=False,
             used_ids=used_ids,
             ref_map=ref_map,
             merged_nodes=merged_nodes,
+        )
+        _add_aliases_from_ref_map(
+            target_ref_map=ref_map,
+            source_ref_map=new_ref_map,
+            source_canonical_id=str(node.get("id", "")),
+            target_canonical_id=str(merged["id"]),
         )
         node_by_key[key] = merged
 
@@ -537,6 +570,7 @@ def _merge_graph_payload(
 def _register_merged_node(
     node: dict[str, Any],
     enriched: bool,
+    preserve_mentions: bool,
     used_ids: set[str],
     ref_map: dict[str, str],
     merged_nodes: list[dict[str, Any]],
@@ -557,7 +591,7 @@ def _register_merged_node(
         "id": node_id,
         "label": label,
         "type": str(node.get("type", "")).strip().lower() or "term",
-        "mentions": _normalize_mentions(node.get("mentions")),
+        "mentions": _normalize_mentions(node.get("mentions")) if preserve_mentions else [],
         "enriched": enriched,
     }
     merged_nodes.append(normalized)
@@ -587,6 +621,19 @@ def _add_ref_aliases(ref_map: dict[str, str], canonical_id: str, aliases: list[A
         alias_key = _normalize_ref(alias)
         if alias_key:
             ref_map[alias_key] = canonical_id
+
+
+def _add_aliases_from_ref_map(
+    target_ref_map: dict[str, str],
+    source_ref_map: dict[str, str],
+    source_canonical_id: str,
+    target_canonical_id: str,
+) -> None:
+    if not source_canonical_id:
+        return
+    for alias, canonical_id in source_ref_map.items():
+        if canonical_id == source_canonical_id and alias:
+            target_ref_map[alias] = target_canonical_id
 
 
 def _filter_nodes_by_selected(nodes: list[dict[str, Any]], selected_entities: list[str]) -> list[dict[str, Any]]:
