@@ -257,17 +257,20 @@ async def create_lecture(
     )
 
     try:
-        process_lecture_chain.delay(str(lecture.id), payload.selected_entities)
+        await asyncio.to_thread(process_lecture_chain.delay, str(lecture.id), payload.selected_entities)
     except Exception:
         lecture.status = LectureStatus.ERROR
         lecture.error_message = "Failed to schedule lecture processing"
         await db.commit()
-        await broadcast_progress(
-            lecture.id,
-            lecture.processing_progress,
-            lecture.status.value if hasattr(lecture.status, "value") else str(lecture.status),
-        )
         logger.exception("Failed to enqueue lecture processing chain lecture_id=%s", lecture.id)
+        try:
+            await broadcast_progress(
+                lecture.id,
+                lecture.processing_progress,
+                lecture.status.value if hasattr(lecture.status, "value") else str(lecture.status),
+            )
+        except Exception:
+            logger.exception("Failed to broadcast enqueue error state lecture_id=%s", lecture.id)
 
     return _to_lecture_response(lecture)
 
