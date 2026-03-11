@@ -17,6 +17,7 @@ from .engagement import (
     HistoryListResponse,
 )
 from .lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
+from .summary import SummaryBlock, SummaryResponse, TranscriptResponse, TranscriptSegment
 
 __all__ = [
     "AdminAddTokensRequest",
@@ -37,5 +38,9 @@ __all__ = [
     "LoginRequest",
     "RefreshRequest",
     "RegisterRequest",
+    "SummaryBlock",
+    "SummaryResponse",
     "TokenResponse",
+    "TranscriptResponse",
+    "TranscriptSegment",
 ]
