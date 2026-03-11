@@ -16,6 +16,7 @@ from .engagement import (
     HistoryLectureResponse,
     HistoryListResponse,
 )
+from .graph import Edge, GraphResponse, Mention, Node
 from .lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 from .summary import SummaryBlock, SummaryResponse, TranscriptResponse, TranscriptSegment
 
@@ -28,14 +29,18 @@ __all__ = [
     "AdminUserResponse",
     "AdminUsersListResponse",
     "CreateLectureRequest",
+    "Edge",
     "FavouriteLectureResponse",
     "FavouritesListResponse",
+    "GraphResponse",
     "HistoryLectureResponse",
     "HistoryListResponse",
     "LLMRequestConfig",
     "LectureListResponse",
     "LectureResponse",
     "LoginRequest",
+    "Mention",
+    "Node",
     "RefreshRequest",
     "RegisterRequest",
     "SummaryBlock",

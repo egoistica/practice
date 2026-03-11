@@ -24,6 +24,7 @@ from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureS
 from app.models.summary import Summary
 from app.models.transcript import Transcript
 from app.models.user import User
+from app.schemas.graph import GraphResponse
 from app.schemas.lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 from app.schemas.summary import SummaryResponse, TranscriptResponse, TranscriptSegment
 from app.services.file_service import delete_lecture_media, save_uploaded_file
@@ -203,6 +204,108 @@ def _build_summary_enrich_prompt(existing_blocks: list[dict[str, Any]], custom_p
     ]
     summary_json = json.dumps(compact_blocks, ensure_ascii=False)
     return f"{base_prompt}\n\nТекущий конспект:\n{summary_json}"
+
+
+def _normalize_graph_mentions(raw_mentions: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_mentions, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[int, float | None]] = set()
+    for item in raw_mentions:
+        if not isinstance(item, dict):
+            continue
+
+        raw_position = item.get("position")
+        if raw_position is None:
+            raw_position = item.get("position_in_text")
+        if isinstance(raw_position, bool):
+            continue
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            continue
+        if position < 0:
+            continue
+
+        raw_timecode = item.get("timecode")
+        timecode: float | None = None
+        if raw_timecode is not None:
+            parsed_timecode = _to_non_negative_float(raw_timecode)
+            if parsed_timecode is not None:
+                timecode = round(parsed_timecode, 3)
+
+        key = (position, timecode)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"position": position, "timecode": timecode})
+
+    return normalized
+
+
+def _normalize_graph_nodes(raw_nodes: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_nodes, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in raw_nodes:
+        if not isinstance(item, dict):
+            continue
+        node_id = str(item.get("id", "")).strip()
+        label = str(item.get("label", "")).strip()
+        if not node_id or not label or node_id in seen_ids:
+            continue
+
+        node_type = str(item.get("type", "entity")).strip() or "entity"
+        enriched = bool(item.get("enriched", False))
+        mentions = _normalize_graph_mentions(item.get("mentions"))
+
+        normalized.append(
+            {
+                "id": node_id,
+                "label": label,
+                "type": node_type,
+                "enriched": enriched,
+                "mentions": mentions,
+            }
+        )
+        seen_ids.add(node_id)
+
+    return normalized
+
+
+def _normalize_graph_edges(raw_edges: Any, allowed_node_ids: set[str]) -> list[dict[str, str]]:
+    if not isinstance(raw_edges, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw_edges:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source", "")).strip()
+        target = str(item.get("target", "")).strip()
+        label = str(item.get("label", "related_to")).strip() or "related_to"
+        if not source or not target:
+            continue
+        if source not in allowed_node_ids or target not in allowed_node_ids:
+            continue
+
+        key = (source, target, label)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"source": source, "target": target, "label": label})
+    return normalized
+
+
+def _to_graph_response(graph: EntityGraph) -> GraphResponse:
+    nodes = _normalize_graph_nodes(list(graph.nodes or []))
+    allowed_node_ids = {node["id"] for node in nodes}
+    edges = _normalize_graph_edges(list(graph.edges or []), allowed_node_ids)
+    return GraphResponse(nodes=nodes, edges=edges, enriched=bool(graph.enriched))
 
 
 def _normalize_bearer_token(raw_value: str | None) -> str | None:
@@ -607,20 +710,35 @@ async def enrich_lecture_summary(
     return _to_summary_response(summary)
 
 
-@router.post("/{lecture_id}/graph/enrich", status_code=status.HTTP_200_OK)
+@router.get("/{lecture_id}/graph", response_model=GraphResponse)
+async def get_lecture_graph(
+    lecture_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> GraphResponse:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    graph = (
+        await db.execute(
+            select(EntityGraph).where(EntityGraph.lecture_id == lecture.id)
+        )
+    ).scalar_one_or_none()
+    if graph is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity graph not found")
+    return _to_graph_response(graph)
+
+
+@router.post("/{lecture_id}/graph/enrich", response_model=GraphResponse, status_code=status.HTTP_200_OK)
 async def enrich_lecture_graph(
     lecture_id: uuid.UUID,
     llm_config: LLMRequestConfig | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    lecture = await db.get(Lecture, lecture_id)
-    if lecture is None or lecture.user_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
+) -> GraphResponse:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
 
     graph = (
         await db.execute(
-            select(EntityGraph).where(EntityGraph.lecture_id == lecture_id)
+            select(EntityGraph).where(EntityGraph.lecture_id == lecture.id)
         )
     ).scalar_one_or_none()
     if graph is None:
@@ -646,7 +764,7 @@ async def enrich_lecture_graph(
             locked_graph = (
                 await db.execute(
                     select(EntityGraph)
-                    .where(EntityGraph.lecture_id == lecture_id)
+                    .where(EntityGraph.lecture_id == lecture.id)
                     .with_for_update()
                 )
             ).scalar_one_or_none()
@@ -693,11 +811,9 @@ async def enrich_lecture_graph(
                 detail="Failed to persist enriched graph",
             ) from None
 
-    return {
-        "nodes": locked_graph.nodes if locked_graph else [],
-        "edges": locked_graph.edges if locked_graph else [],
-        "enriched": bool(locked_graph.enriched) if locked_graph else False,
-    }
+    if locked_graph is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Entity graph not found")
+    return _to_graph_response(locked_graph)
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)
