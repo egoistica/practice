@@ -215,7 +215,7 @@ def download_video(url: str, output_path: str) -> str:
             message = str(exc).lower()
             if "unsupported url" in message or "unsupported" in message:
                 raise UnsupportedVideoFormatError("Unsupported URL or video format") from exc
-            if "sign in to confirm you're not a bot" in message or "confirm you’re not a bot" in message:
+            if "sign in to confirm you're not a bot" in message or "confirm you're not a bot" in message:
                 raise VideoDownloadError(
                     "YouTube requires authentication for this video. "
                     "Provide cookies.txt via YTDLP_COOKIES_FILE."
