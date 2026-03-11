@@ -410,7 +410,7 @@ async def parse_create_lecture_request(
 @router.post("", response_model=LectureResponse, status_code=status.HTTP_201_CREATED)
 async def create_lecture(
     payload: CreateLectureRequest = Depends(parse_create_lecture_request),
-    file: UploadFile | None = File(default=None),
+    file: UploadFile = File(default=None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> LectureResponse:

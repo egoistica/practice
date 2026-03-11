@@ -204,6 +204,11 @@ def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]
     elif provider == "openai":
         if not api_key and settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
             api_key = settings.OPENAI_API_KEY.strip()
+        if not api_key:
+            raise LLMServiceError(
+                "OPENAI_API_KEY is required when LLM provider is 'openai'. "
+                "Set OPENAI_API_KEY in environment or pass api_key in llm_config."
+            )
     elif "/" not in model:
         model = f"{provider}/{model}"
 

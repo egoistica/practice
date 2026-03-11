@@ -47,6 +47,32 @@ def _resolve_cookiefile() -> str | None:
     return str(cookie_path)
 
 
+def _resolve_js_runtimes() -> dict[str, dict[str, str]]:
+    raw_value = os.getenv("YTDLP_JS_RUNTIMES", "node")
+    runtimes: dict[str, dict[str, str]] = {}
+
+    for item in raw_value.split(","):
+        token = item.strip()
+        if not token:
+            continue
+
+        runtime_name, separator, runtime_path = token.partition(":")
+        runtime_name = runtime_name.strip().lower()
+        if not runtime_name:
+            continue
+
+        config: dict[str, str] = {}
+        if separator and runtime_path.strip():
+            config["path"] = runtime_path.strip()
+        runtimes[runtime_name] = config
+    return runtimes
+
+
+def _resolve_remote_components() -> list[str]:
+    raw_value = os.getenv("YTDLP_REMOTE_COMPONENTS", "ejs:github,ejs:npm")
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
 def _decode_ffmpeg_error(exc: ffmpeg.Error) -> str:
     if isinstance(exc.stderr, (bytes, bytearray)):
         return exc.stderr.decode("utf-8", errors="ignore").strip()
@@ -174,13 +200,27 @@ def download_video(url: str, output_path: str) -> str:
         "outtmpl": str(output_dir / output_template),
         "merge_output_format": "mp4",
         "restrictfilenames": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "file_access_retries": 3,
         "quiet": True,
         "no_warnings": True,
         "allowed_extractors": ["default", "-generic"],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web", "ios"],
+            }
+        },
     }
     cookiefile = _resolve_cookiefile()
     if cookiefile:
         ydl_base_opts["cookiefile"] = cookiefile
+    js_runtimes = _resolve_js_runtimes()
+    if js_runtimes:
+        ydl_base_opts["js_runtimes"] = js_runtimes
+    remote_components = _resolve_remote_components()
+    if remote_components:
+        ydl_base_opts["remote_components"] = remote_components
 
     format_candidates = (
         "bestvideo+bestaudio/best",
@@ -213,12 +253,29 @@ def download_video(url: str, output_path: str) -> str:
         except yt_dlp.utils.DownloadError as exc:
             last_error = exc
             message = str(exc).lower()
-            if "unsupported url" in message or "unsupported" in message:
+            normalized_message = message.replace("’", "'")
+            if "unsupported url" in normalized_message or "unsupported" in normalized_message:
                 raise UnsupportedVideoFormatError("Unsupported URL or video format") from exc
-            if "sign in to confirm you're not a bot" in message or "confirm you're not a bot" in message:
+            if (
+                "sign in to confirm you're not a bot" in normalized_message
+                or "confirm you're not a bot" in normalized_message
+            ):
                 raise VideoDownloadError(
                     "YouTube requires authentication for this video. "
                     "Provide cookies.txt via YTDLP_COOKIES_FILE."
+                ) from exc
+            if "http error 403" in normalized_message or "forbidden" in normalized_message:
+                raise VideoDownloadError(
+                    "YouTube denied media stream access (HTTP 403). "
+                    "Re-export fresh cookies.txt for youtube.com or upload the video file manually."
+                ) from exc
+            if (
+                "requested format is not available" in normalized_message
+                or "only images are available" in normalized_message
+            ):
+                raise VideoDownloadError(
+                    "YouTube did not provide downloadable video streams for this URL in the current environment. "
+                    "Try another video/cookies/network, or upload the file manually."
                 ) from exc
             continue
 
