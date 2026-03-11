@@ -25,9 +25,10 @@ from app.models.summary import Summary
 from app.models.transcript import Transcript
 from app.models.user import User
 from app.schemas.lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
+from app.schemas.summary import SummaryResponse, TranscriptResponse, TranscriptSegment
 from app.services.file_service import delete_lecture_media, save_uploaded_file
 from app.services.history_service import record_history_visit
-from app.services.llm_service import LLMServiceError, enrich_graph, merge_graph_data
+from app.services.llm_service import LLMServiceError, enrich_graph, merge_graph_data, summarize_segment
 from app.services.progress_service import (
     broadcast_progress,
     register_subscription,
@@ -38,6 +39,10 @@ from app.tasks.process_lecture import process_lecture_chain
 router = APIRouter(prefix="/lectures", tags=["lectures"])
 ws_router = APIRouter(tags=["lectures"])
 logger = logging.getLogger(__name__)
+SUMMARY_ENRICH_PROMPT = (
+    "Расширь существующий конспект лекции: добавь полезные детали, примеры и уточнения. "
+    "Не дублируй уже имеющиеся блоки и верни только JSON формата blocks."
+)
 
 
 def _to_lecture_response(lecture: Lecture) -> LectureResponse:
@@ -48,6 +53,156 @@ def _to_lecture_response(lecture: Lecture) -> LectureResponse:
         processing_progress=lecture.processing_progress,
         created_at=lecture.created_at,
     )
+
+
+async def _get_owned_lecture(
+    db: AsyncSession,
+    lecture_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> Lecture:
+    lecture = await db.get(Lecture, lecture_id)
+    if lecture is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
+    if lecture.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return lecture
+
+
+def _collapse_spaces(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _to_non_negative_float(raw_value: Any) -> float | None:
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _normalize_summary_blocks(raw_blocks: list[Any], *, default_enriched: bool) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in raw_blocks:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        title = str(item.get("title", "")).strip() or "Блок"
+        block_type = str(item.get("type", "thought")).strip() or "thought"
+        timecode_start = _to_non_negative_float(item.get("timecode_start"))
+        timecode_end = _to_non_negative_float(item.get("timecode_end"))
+        if timecode_start is not None and timecode_end is not None and timecode_end < timecode_start:
+            timecode_end = timecode_start
+
+        enriched_flag = item.get("enriched")
+        if isinstance(enriched_flag, bool):
+            enriched = enriched_flag
+        else:
+            enriched = default_enriched
+
+        normalized.append(
+            {
+                "title": title,
+                "text": text,
+                "type": block_type,
+                "timecode_start": timecode_start,
+                "timecode_end": timecode_end,
+                "enriched": enriched,
+            }
+        )
+    return normalized
+
+
+def _summary_block_key(block: dict[str, Any]) -> tuple[str, str, str]:
+    title_key = _collapse_spaces(str(block.get("title", "")).strip().lower())
+    text_key = _collapse_spaces(str(block.get("text", "")).strip().lower())
+    type_key = _collapse_spaces(str(block.get("type", "")).strip().lower())
+    return title_key, text_key, type_key
+
+
+def _merge_summary_blocks(
+    existing_blocks: list[Any],
+    incoming_blocks: list[Any],
+) -> list[dict[str, Any]]:
+    merged = _normalize_summary_blocks(existing_blocks, default_enriched=False)
+    seen = {_summary_block_key(block) for block in merged}
+
+    for block in _normalize_summary_blocks(incoming_blocks, default_enriched=True):
+        key = _summary_block_key(block)
+        if key in seen:
+            continue
+        merged.append(block)
+        seen.add(key)
+    return merged
+
+
+def _summary_timecode_range(blocks: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    starts = [float(block["timecode_start"]) for block in blocks if block.get("timecode_start") is not None]
+    ends = [float(block["timecode_end"]) for block in blocks if block.get("timecode_end") is not None]
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
+def _to_summary_response(summary: Summary) -> SummaryResponse:
+    normalized = _normalize_summary_blocks(list(summary.content or []), default_enriched=False)
+    blocks = [
+        {
+            "title": block["title"],
+            "text": block["text"],
+            "type": block["type"],
+            "timecode_start": block["timecode_start"],
+            "timecode_end": block["timecode_end"],
+        }
+        for block in normalized
+    ]
+    enriched = any(bool(block.get("enriched")) for block in normalized)
+    return SummaryResponse(id=summary.id, blocks=blocks, enriched=enriched)
+
+
+def _normalize_transcript_segments(raw_segments: list[Any]) -> list[TranscriptSegment]:
+    normalized: list[TranscriptSegment] = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+
+        start_raw = item.get("start") if item.get("start") is not None else item.get("timecode_start")
+        end_raw = item.get("end") if item.get("end") is not None else item.get("timecode_end")
+        start = _to_non_negative_float(start_raw)
+        end = _to_non_negative_float(end_raw)
+        if start is not None and end is not None and end < start:
+            end = start
+
+        speaker_raw = item.get("speaker")
+        speaker = str(speaker_raw).strip() if speaker_raw is not None else None
+        if speaker == "":
+            speaker = None
+
+        normalized.append(TranscriptSegment(start=start, end=end, text=text, speaker=speaker))
+    return normalized
+
+
+def _build_summary_enrich_prompt(existing_blocks: list[dict[str, Any]], custom_prompt: str | None) -> str:
+    base_prompt = custom_prompt.strip() if custom_prompt and custom_prompt.strip() else SUMMARY_ENRICH_PROMPT
+    if not existing_blocks:
+        return base_prompt
+
+    compact_blocks = [
+        {
+            "title": block["title"],
+            "text": block["text"],
+            "type": block["type"],
+        }
+        for block in existing_blocks
+    ]
+    summary_json = json.dumps(compact_blocks, ensure_ascii=False)
+    return f"{base_prompt}\n\nТекущий конспект:\n{summary_json}"
 
 
 def _normalize_bearer_token(raw_value: str | None) -> str | None:
@@ -334,6 +489,122 @@ async def get_lecture(
         logger.exception("Failed to record lecture history user_id=%s lecture_id=%s", user.id, lecture.id)
 
     return response
+
+
+@router.get("/{lecture_id}/summary", response_model=SummaryResponse)
+async def get_lecture_summary(
+    lecture_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> SummaryResponse:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    summary = (
+        await db.execute(select(Summary).where(Summary.lecture_id == lecture.id))
+    ).scalar_one_or_none()
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Summary not found")
+    return _to_summary_response(summary)
+
+
+@router.get("/{lecture_id}/transcript", response_model=TranscriptResponse)
+async def get_lecture_transcript(
+    lecture_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> TranscriptResponse:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    transcript = (
+        await db.execute(select(Transcript).where(Transcript.lecture_id == lecture.id))
+    ).scalar_one_or_none()
+    if transcript is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
+
+    return TranscriptResponse(
+        lecture_id=lecture.id,
+        full_text=str(transcript.full_text or ""),
+        segments=_normalize_transcript_segments(list(transcript.segments or [])),
+    )
+
+
+@router.post("/{lecture_id}/summary/enrich", response_model=SummaryResponse, status_code=status.HTTP_200_OK)
+async def enrich_lecture_summary(
+    lecture_id: uuid.UUID,
+    llm_config: LLMRequestConfig | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> SummaryResponse:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    transcript = (
+        await db.execute(select(Transcript).where(Transcript.lecture_id == lecture.id))
+    ).scalar_one_or_none()
+    if transcript is None or not str(transcript.full_text or "").strip():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
+
+    summary = (
+        await db.execute(select(Summary).where(Summary.lecture_id == lecture.id))
+    ).scalar_one_or_none()
+    existing_blocks = _normalize_summary_blocks(
+        list(summary.content or []) if summary else [],
+        default_enriched=False,
+    )
+
+    request_llm_config = llm_config.model_dump(exclude_none=True) if llm_config else {}
+    custom_prompt_raw = request_llm_config.get("prompt")
+    custom_prompt = str(custom_prompt_raw) if custom_prompt_raw is not None else None
+    request_llm_config["prompt"] = _build_summary_enrich_prompt(existing_blocks, custom_prompt)
+
+    try:
+        enriched_payload = await asyncio.to_thread(
+            summarize_segment,
+            str(transcript.full_text),
+            request_llm_config,
+        )
+    except (LLMServiceError, ValueError):
+        logger.exception("Summary enrichment failed lecture_id=%s user_id=%s", lecture_id, user.id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Summary enrichment failed") from None
+
+    incoming_blocks = _normalize_summary_blocks(
+        list(enriched_payload.get("blocks", [])),
+        default_enriched=True,
+    )
+    if not incoming_blocks:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Summary enrichment returned empty blocks",
+        )
+
+    merged_blocks = _merge_summary_blocks(existing_blocks, incoming_blocks)
+    if not merged_blocks:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Summary enrichment returned no usable blocks",
+        )
+
+    range_start, range_end = _summary_timecode_range(merged_blocks)
+    try:
+        if summary is None:
+            summary = Summary(
+                lecture_id=lecture.id,
+                content=merged_blocks,
+                timecode_start=range_start,
+                timecode_end=range_end,
+            )
+            db.add(summary)
+        else:
+            summary.content = merged_blocks
+            summary.timecode_start = range_start
+            summary.timecode_end = range_end
+        await db.commit()
+        await db.refresh(summary)
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception("Failed to persist enriched summary lecture_id=%s user_id=%s", lecture_id, user.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist enriched summary",
+        ) from None
+
+    return _to_summary_response(summary)
 
 
 @router.post("/{lecture_id}/graph/enrich", status_code=status.HTTP_200_OK)
