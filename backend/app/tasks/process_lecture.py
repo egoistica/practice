@@ -5,13 +5,13 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, TypeVar
 
 from celery import chain, shared_task
 from sqlalchemy import delete, select
 
 from app.core.config import settings
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, engine
 from app.models.entity_graph import EntityGraph
 from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureStatus
 from app.models.summary import Summary
@@ -25,12 +25,31 @@ from app.services.video_service import download_video, extract_audio, get_video_
 logger = logging.getLogger(__name__)
 _NO_VALUE = object()
 SEGMENT_BLOCK_TYPE = "_segment"
+_T = TypeVar("_T")
+_WORKER_LOOP: asyncio.AbstractEventLoop | None = None
 _raw_realtime_segment_seconds = os.getenv("REALTIME_SEGMENT_SECONDS")
 try:
     _parsed_realtime_segment_seconds = int(_raw_realtime_segment_seconds) if _raw_realtime_segment_seconds is not None else 60
 except (TypeError, ValueError):
     _parsed_realtime_segment_seconds = 60
 REALTIME_SEGMENT_SECONDS = max(15, _parsed_realtime_segment_seconds)
+
+
+def _run_async(coro: Awaitable[_T]) -> _T:
+    global _WORKER_LOOP
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("_run_async cannot be called from a running event loop")
+
+    if _WORKER_LOOP is None or _WORKER_LOOP.is_closed():
+        _WORKER_LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(_WORKER_LOOP)
+        # Reset inherited asyncpg pool state in prefork worker children.
+        _WORKER_LOOP.run_until_complete(engine.dispose())
+    return _WORKER_LOOP.run_until_complete(coro)
 
 
 def _parse_lecture_uuid(lecture_id: str | uuid.UUID) -> uuid.UUID:
@@ -76,7 +95,7 @@ async def _get_lecture_async(lecture_uuid: uuid.UUID) -> Lecture:
 
 
 def _get_lecture_sync(lecture_uuid: uuid.UUID) -> Lecture:
-    return asyncio.run(_get_lecture_async(lecture_uuid))
+    return _run_async(_get_lecture_async(lecture_uuid))
 
 
 async def _reset_processing_artifacts_async(lecture_uuid: uuid.UUID) -> None:
@@ -164,7 +183,7 @@ def _update_lecture_state(
     realtime_mode: bool | object = _NO_VALUE,
     publish_progress: bool = True,
 ) -> tuple[LectureStatus, int]:
-    current_status, current_progress = asyncio.run(
+    current_status, current_progress = _run_async(
         _update_lecture_state_async(
             lecture_uuid,
             status=status,
@@ -577,7 +596,7 @@ def _run_realtime_enrichment(
                 timecode_start=chunk.get("timecode_start"),
                 timecode_end=chunk.get("timecode_end"),
             )
-        asyncio.run(_append_summary_blocks_async(lecture_uuid, summary_blocks))
+        _run_async(_append_summary_blocks_async(lecture_uuid, summary_blocks))
         _broadcast_realtime_event(
             lecture_uuid,
             "lecture_realtime_summary",
@@ -595,7 +614,7 @@ def _run_realtime_enrichment(
             selected_entities=selected_entities,
             llm_config={},
         )
-        merged_nodes, merged_edges = asyncio.run(
+        merged_nodes, merged_edges = _run_async(
             _merge_entity_graph_async(
                 lecture_uuid,
                 nodes=list(entities_payload.get("nodes", [])),
@@ -649,7 +668,7 @@ def _run_standard_enrichment_from_transcript(
         )
 
     summary_start, summary_end = _timecode_range(summary_blocks)
-    asyncio.run(
+    _run_async(
         _upsert_summary_async(
             lecture_uuid,
             content=summary_blocks,
@@ -662,7 +681,7 @@ def _run_standard_enrichment_from_transcript(
         selected_entities=selected_entities,
         llm_config={},
     )
-    asyncio.run(
+    _run_async(
         _upsert_entity_graph_async(
             lecture_uuid,
             nodes=list(entities_payload.get("nodes", [])),
@@ -712,7 +731,7 @@ def _run_standard_enrichment_from_transcript(
 def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | None = None) -> dict[str, Any]:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        claimed, _is_realtime = asyncio.run(_claim_lecture_for_processing_async(lecture_uuid))
+        claimed, _is_realtime = _run_async(_claim_lecture_for_processing_async(lecture_uuid))
         if not claimed:
             logger.info("Lecture is already processing, skipping duplicate start lecture_id=%s", lecture_uuid)
             return {"lecture_id": str(lecture_uuid), "status": "already_processing"}
@@ -722,7 +741,7 @@ def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | 
         except Exception:
             logger.exception("Failed to broadcast claimed processing state lecture_id=%s", lecture_uuid)
 
-        asyncio.run(_reset_processing_artifacts_async(lecture_uuid))
+        _run_async(_reset_processing_artifacts_async(lecture_uuid))
         workflow = chain(
             download_video_task.s(str(lecture_uuid)),
             extract_audio_task.s(),
@@ -822,7 +841,7 @@ def transcribe_task(self, lecture_id: str, selected_entities: list[str] | None =
         if not full_text:
             raise ValueError("Transcription returned empty text")
 
-        asyncio.run(_upsert_transcript_async(lecture_uuid, segments=segments, full_text=full_text))
+        _run_async(_upsert_transcript_async(lecture_uuid, segments=segments, full_text=full_text))
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
@@ -859,11 +878,11 @@ def segment_text_task(self, lecture_id: str) -> str:
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
 
-        transcript_segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+        transcript_segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
         segmented_blocks = segment_text(transcript_full_text, transcript_segments)
         placeholders = _segment_placeholders(segmented_blocks)
         summary_start, summary_end = _timecode_range(placeholders)
-        asyncio.run(
+        _run_async(
             _upsert_summary_async(
                 lecture_uuid,
                 content=placeholders,
@@ -891,18 +910,18 @@ def summarize_task(self, lecture_id: str) -> str:
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
 
-        summary_content = asyncio.run(_get_summary_content_async(lecture_uuid))
+        summary_content = _run_async(_get_summary_content_async(lecture_uuid))
         segmented_blocks = [
             item for item in summary_content if isinstance(item, dict) and item.get("type") == SEGMENT_BLOCK_TYPE
         ]
 
         if not segmented_blocks:
-            transcript_segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+            transcript_segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
             segmented_blocks = segment_text(transcript_full_text, transcript_segments)
 
         summary_blocks = _aggregate_summary_blocks(segmented_blocks)
         if not summary_blocks:
-            _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+            _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
             fallback = summarize_segment(transcript_full_text, llm_config={})
             summary_blocks = list(fallback.get("blocks", []))
         if not summary_blocks:
@@ -917,7 +936,7 @@ def summarize_task(self, lecture_id: str) -> str:
             )
 
         summary_start, summary_end = _timecode_range(summary_blocks)
-        asyncio.run(
+        _run_async(
             _upsert_summary_async(
                 lecture_uuid,
                 content=summary_blocks,
@@ -945,7 +964,7 @@ def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | 
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
 
-        _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+        _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
         if not transcript_full_text:
             raise ValueError("Transcript text is empty")
 
@@ -954,7 +973,7 @@ def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | 
             selected_entities=selected_entities,
             llm_config={},
         )
-        asyncio.run(
+        _run_async(
             _upsert_entity_graph_async(
                 lecture_uuid,
                 nodes=list(entities_payload.get("nodes", [])),
@@ -977,7 +996,7 @@ def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | 
 def save_results_task(self, lecture_id: str) -> dict[str, Any]:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
-        _segments, transcript_full_text = asyncio.run(_get_transcript_async(lecture_uuid))
+        _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
         if not transcript_full_text:
             raise ValueError("transcript_full_text is required")
 
@@ -993,3 +1012,4 @@ def save_results_task(self, lecture_id: str) -> dict[str, Any]:
     except Exception as exc:
         _mark_lecture_error(lecture_uuid, exc, "save_results_task")
         raise
+
