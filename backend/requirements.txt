@@ -18,7 +18,8 @@ ffmpeg-python==0.2.0
 requests==2.31.0
 reportlab==4.2.2
 networkx==3.2.1
-matplotlib==3.8.4
+# TODO(networkx): validate export_graph_to_image APIs (DiGraph, spring_layout, draw_networkx_*) against 3.6.x, then bump.
+matplotlib==3.10.0
 python-multipart==0.0.22
 aiofiles==23.2.1
 uvicorn==0.24.0
