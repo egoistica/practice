@@ -29,6 +29,8 @@ from app.schemas.graph import GraphResponse
 from app.schemas.lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 from app.schemas.summary import SummaryResponse, TranscriptResponse, TranscriptSegment
 from app.services.export_service import (
+    export_graph_to_image,
+    export_graph_to_json,
     export_summary_to_json,
     export_summary_to_markdown,
     export_summary_to_pdf,
@@ -641,6 +643,40 @@ async def export_lecture_summary(
         content=content,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{base_filename}.pdf"'},
+    )
+
+
+@router.get("/{lecture_id}/graph/export")
+async def export_lecture_graph(
+    lecture_id: uuid.UUID,
+    export_format: Literal["json", "png"] = Query(alias="format"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    graph = (
+        await db.execute(select(EntityGraph).where(EntityGraph.lecture_id == lecture.id))
+    ).scalar_one_or_none()
+    if graph is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity graph not found")
+
+    base_filename = f"lecture-{lecture.id}-graph"
+    if export_format == "json":
+        content = export_graph_to_json(graph)
+        return Response(
+            content=content,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{base_filename}.json"'},
+        )
+
+    try:
+        content = await asyncio.to_thread(export_graph_to_image, graph)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="{base_filename}.png"'},
     )
 
 
