@@ -30,6 +30,23 @@ BLOCKED_METADATA_NETWORKS = (
 )
 
 
+def _resolve_cookiefile() -> str | None:
+    raw_path = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if not raw_path:
+        return None
+
+    cookie_path = Path(raw_path)
+    if not cookie_path.is_absolute():
+        cookie_path = Path.cwd() / cookie_path
+
+    if not cookie_path.exists() or not cookie_path.is_file():
+        raise VideoDownloadError(
+            f"YTDLP cookies file not found: {cookie_path}. "
+            "Set YTDLP_COOKIES_FILE to a valid cookies.txt path."
+        )
+    return str(cookie_path)
+
+
 def _decode_ffmpeg_error(exc: ffmpeg.Error) -> str:
     if isinstance(exc.stderr, (bytes, bytearray)):
         return exc.stderr.decode("utf-8", errors="ignore").strip()
@@ -162,6 +179,9 @@ def download_video(url: str, output_path: str) -> str:
         "no_warnings": True,
         "allowed_extractors": ["default", "-generic"],
     }
+    cookiefile = _resolve_cookiefile()
+    if cookiefile:
+        ydl_opts["cookiefile"] = cookiefile
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -185,6 +205,11 @@ def download_video(url: str, output_path: str) -> str:
         message = str(exc).lower()
         if "unsupported url" in message or "unsupported" in message:
             raise UnsupportedVideoFormatError("Unsupported URL or video format") from exc
+        if "sign in to confirm you're not a bot" in message or "confirm you’re not a bot" in message:
+            raise VideoDownloadError(
+                "YouTube requires authentication for this video. "
+                "Provide cookies.txt via YTDLP_COOKIES_FILE."
+            ) from exc
         raise VideoDownloadError(f"Unable to download video from URL: {normalized_url}") from exc
 
     raise VideoDownloadError("Video download finished but output file was not found")

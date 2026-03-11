@@ -49,6 +49,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
+      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./backend:/app
@@ -78,6 +79,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
+      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
     command: celery -A celery_app.celery_app worker --loglevel=info
     volumes:
       - ./backend:/app
