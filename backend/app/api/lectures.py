@@ -6,7 +6,8 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, WebSocket, status
+from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select
@@ -27,6 +28,11 @@ from app.models.user import User
 from app.schemas.graph import GraphResponse
 from app.schemas.lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 from app.schemas.summary import SummaryResponse, TranscriptResponse, TranscriptSegment
+from app.services.export_service import (
+    export_summary_to_json,
+    export_summary_to_markdown,
+    export_summary_to_pdf,
+)
 from app.services.file_service import delete_lecture_media, save_uploaded_file
 from app.services.history_service import record_history_visit
 from app.services.llm_service import LLMServiceError, enrich_graph, merge_graph_data, summarize_segment
@@ -626,6 +632,47 @@ async def get_lecture_transcript(
         lecture_id=lecture.id,
         full_text=str(transcript.full_text or ""),
         segments=_normalize_transcript_segments(list(transcript.segments or [])),
+    )
+
+
+@router.get("/{lecture_id}/export")
+async def export_lecture_summary(
+    lecture_id: uuid.UUID,
+    export_format: Literal["md", "pdf", "json"] = Query(alias="format"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    summary = (
+        await db.execute(select(Summary).where(Summary.lecture_id == lecture.id))
+    ).scalar_one_or_none()
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Summary not found")
+
+    base_filename = f"lecture-{lecture.id}-summary"
+    if export_format == "md":
+        content = export_summary_to_markdown(summary)
+        return Response(
+            content=content,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{base_filename}.md"'},
+        )
+    if export_format == "json":
+        content = export_summary_to_json(summary)
+        return Response(
+            content=content,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{base_filename}.json"'},
+        )
+
+    try:
+        content = export_summary_to_pdf(summary)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{base_filename}.pdf"'},
     )
 
 
