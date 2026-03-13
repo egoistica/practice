@@ -563,6 +563,7 @@ def _parse_summary_payload(raw_content: str) -> dict[str, Any]:
 def _parse_entities_payload(raw_content: str, selected_entities: list[str]) -> dict[str, Any]:
     try:
         payload = _load_json_payload(raw_content)
+        payload = _select_entity_payload_candidate(payload, raw_content)
         payload = _coerce_entity_graph_payload(payload)
         if not isinstance(payload, dict):
             raise LLMResponseParseError("Entity response JSON must be an object")
@@ -676,6 +677,27 @@ def _coerce_entity_graph_payload(payload: Any) -> Any:
     return current
 
 
+def _select_entity_payload_candidate(initial_payload: Any, raw_content: str) -> Any:
+    if _contains_entity_markers(initial_payload):
+        return initial_payload
+
+    marker_keys = {"nodes", "edges", "entities", "relations", "links", "vertexes", "vertices"}
+    for candidate in _iter_json_candidates(raw_content):
+        if _contains_any_keys(candidate, marker_keys):
+            return candidate
+    return initial_payload
+
+
+def _contains_entity_markers(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return _contains_any_keys(payload, {"nodes", "edges", "entities", "relations", "links"})
+
+
+def _contains_any_keys(payload: Any, keys: set[str]) -> bool:
+    return isinstance(payload, dict) and any(key in payload for key in keys)
+
+
 def _extract_entity_lists(payload: dict[str, Any]) -> tuple[Any, Any]:
     nodes_raw = _coerce_list_like(payload.get("nodes"), field_name="nodes")
     if not isinstance(nodes_raw, list):
@@ -738,24 +760,39 @@ def _load_json_payload(raw_content: str) -> Any:
     except json.JSONDecodeError:
         pass
 
-    fenced_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw_content, flags=re.IGNORECASE)
-    if fenced_match:
+    for fenced_body in _extract_fenced_blocks(raw_content):
         try:
-            return json.loads(fenced_match.group(1))
+            return json.loads(fenced_body)
         except json.JSONDecodeError:
-            pass
+            continue
 
+    for candidate in _iter_json_candidates(raw_content):
+        return candidate
+
+    raise LLMResponseParseError("Unable to parse JSON from LLM response")
+
+
+def _extract_fenced_blocks(raw_content: str) -> list[str]:
+    blocks: list[str] = []
+    for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_content, flags=re.IGNORECASE):
+        body = str(match.group(1) or "").strip()
+        if body:
+            blocks.append(body)
+    return blocks
+
+
+def _iter_json_candidates(raw_content: str) -> list[Any]:
+    candidates: list[Any] = []
     decoder = json.JSONDecoder()
     for idx, char in enumerate(raw_content):
-        if char != "{":
+        if char not in "{[":
             continue
         try:
             payload, _end = decoder.raw_decode(raw_content[idx:])
-            return payload
         except json.JSONDecodeError:
             continue
-
-    raise LLMResponseParseError("Unable to parse JSON from LLM response")
+        candidates.append(payload)
+    return candidates
 
 
 def _truncate_for_log(value: Any, limit: int = 1000) -> str:
