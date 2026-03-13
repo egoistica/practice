@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from typing import Any, Optional
@@ -8,6 +9,8 @@ from typing import Any, Optional
 from litellm import completion
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 SUMMARY_PROMPT = (
@@ -38,6 +41,7 @@ ENTITY_SYSTEM_PROMPT = (
     '{"nodes":[{"id":"...","label":"...","type":"...","mentions":[{"position_in_text":0,"timecode":0.0}]}],'
     '"edges":[{"source":"...","target":"...","label":"..."}]}.'
     "Если время упоминания неизвестно, указывай timecode: null или опускай поле timecode."
+    "Если сущности не найдены, верни строго: {\"nodes\": [], \"edges\": []}."
 )
 ENRICH_SYSTEM_PROMPT = (
     "Ты расширяешь граф сущностей. Верни только валидный JSON без markdown. "
@@ -557,25 +561,36 @@ def _parse_summary_payload(raw_content: str) -> dict[str, Any]:
 
 
 def _parse_entities_payload(raw_content: str, selected_entities: list[str]) -> dict[str, Any]:
-    payload = _load_json_payload(raw_content)
-    if not isinstance(payload, dict):
-        raise LLMResponseParseError("Entity response JSON must be an object")
+    try:
+        payload = _load_json_payload(raw_content)
+        payload = _coerce_entity_graph_payload(payload)
+        if not isinstance(payload, dict):
+            raise LLMResponseParseError("Entity response JSON must be an object")
 
-    nodes_raw = payload.get("nodes")
-    edges_raw = payload.get("edges")
-    if not isinstance(nodes_raw, list):
-        raise LLMResponseParseError("Entity response must contain 'nodes' as a list")
-    if not isinstance(edges_raw, list):
-        raise LLMResponseParseError("Entity response must contain 'edges' as a list")
+        nodes_raw, edges_raw = _extract_entity_lists(payload)
+        if not isinstance(nodes_raw, list):
+            raise LLMResponseParseError(
+                f"Entity response must contain 'nodes' as a list (got {type(nodes_raw).__name__})"
+            )
+        if not isinstance(edges_raw, list):
+            raise LLMResponseParseError(
+                f"Entity response must contain 'edges' as a list (got {type(edges_raw).__name__})"
+            )
 
-    nodes, ref_map = _normalize_nodes(nodes_raw)
-    if selected_entities:
-        nodes = _filter_nodes_by_selected(nodes, selected_entities)
-        allowed_ids = {node["id"] for node in nodes}
-        ref_map = {key: node_id for key, node_id in ref_map.items() if node_id in allowed_ids}
+        nodes, ref_map = _normalize_nodes(nodes_raw)
+        if selected_entities:
+            nodes = _filter_nodes_by_selected(nodes, selected_entities)
+            allowed_ids = {node["id"] for node in nodes}
+            ref_map = {key: node_id for key, node_id in ref_map.items() if node_id in allowed_ids}
 
-    edges = _normalize_edges(edges_raw, ref_map, {node["id"] for node in nodes})
-    return {"nodes": nodes, "edges": edges}
+        edges = _normalize_edges(edges_raw, ref_map, {node["id"] for node in nodes})
+        return {"nodes": nodes, "edges": edges}
+    except LLMResponseParseError:
+        logger.exception(
+            "Failed to parse entity graph payload. raw_content=%s",
+            _truncate_for_log(raw_content, limit=2000),
+        )
+        raise
 
 
 def _parse_enrichment_payload(raw_content: str) -> dict[str, list[Any]]:
@@ -630,6 +645,93 @@ def _parse_final_summary_payload(raw_content: str) -> dict[str, Any]:
     return {"final_summary": {"title": title, "blocks": blocks}}
 
 
+def _coerce_entity_graph_payload(payload: Any) -> Any:
+    current = payload
+    wrapper_keys = ("result", "data", "graph", "entity_graph", "payload", "response")
+    marker_keys = ("nodes", "edges", "entities", "relations", "links")
+
+    for _ in range(5):
+        if not isinstance(current, dict):
+            return current
+        if any(key in current for key in marker_keys):
+            return current
+
+        nested: Any = None
+        for key in wrapper_keys:
+            candidate = current.get(key)
+            if isinstance(candidate, dict):
+                nested = candidate
+                break
+            if isinstance(candidate, str) and "{" in candidate:
+                try:
+                    candidate_payload = _load_json_payload(candidate)
+                except LLMResponseParseError:
+                    continue
+                if isinstance(candidate_payload, dict):
+                    nested = candidate_payload
+                    break
+        if nested is None:
+            return current
+        current = nested
+    return current
+
+
+def _extract_entity_lists(payload: dict[str, Any]) -> tuple[Any, Any]:
+    nodes_raw = _coerce_list_like(payload.get("nodes"), field_name="nodes")
+    if not isinstance(nodes_raw, list):
+        for alias in ("entities", "vertexes", "vertices"):
+            candidate = _coerce_list_like(payload.get(alias), field_name="nodes")
+            if isinstance(candidate, list):
+                nodes_raw = candidate
+                break
+
+    edges_raw = _coerce_list_like(payload.get("edges"), field_name="edges")
+    if not isinstance(edges_raw, list):
+        for alias in ("relations", "links", "connections"):
+            candidate = _coerce_list_like(payload.get(alias), field_name="edges")
+            if isinstance(candidate, list):
+                edges_raw = candidate
+                break
+    if edges_raw is None:
+        edges_raw = []
+
+    return nodes_raw, edges_raw
+
+
+def _coerce_list_like(raw_value: Any, *, field_name: str) -> Any:
+    if isinstance(raw_value, list):
+        return raw_value
+
+    if isinstance(raw_value, tuple):
+        return list(raw_value)
+
+    if isinstance(raw_value, str):
+        candidate = raw_value.strip()
+        if not candidate:
+            return None
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return _coerce_list_like(parsed, field_name=field_name)
+
+    if isinstance(raw_value, dict):
+        for key in ("items", "list", "data", field_name):
+            nested = raw_value.get(key)
+            if nested is raw_value:
+                continue
+            coerced = _coerce_list_like(nested, field_name=field_name)
+            if isinstance(coerced, list):
+                return coerced
+
+        if field_name == "nodes" and {"id", "label"} & set(raw_value.keys()):
+            return [raw_value]
+        if field_name == "edges" and {"source", "target"} <= set(raw_value.keys()):
+            return [raw_value]
+
+    return None
+
+
 def _load_json_payload(raw_content: str) -> Any:
     try:
         return json.loads(raw_content)
@@ -654,6 +756,13 @@ def _load_json_payload(raw_content: str) -> Any:
             continue
 
     raise LLMResponseParseError("Unable to parse JSON from LLM response")
+
+
+def _truncate_for_log(value: Any, limit: int = 1000) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...(truncated {len(text) - limit} chars)"
 
 
 def _normalize_block_type(raw_type: Any) -> str:

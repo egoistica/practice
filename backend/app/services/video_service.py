@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import ipaddress
 import os
 import socket
@@ -8,6 +9,8 @@ from urllib.parse import urlparse
 
 import ffmpeg
 import yt_dlp
+
+logger = logging.getLogger(__name__)
 
 
 class VideoServiceError(RuntimeError):
@@ -223,11 +226,15 @@ def download_video(url: str, output_path: str) -> str:
         ydl_base_opts["remote_components"] = remote_components
 
     format_candidates = (
-        "bestvideo+bestaudio/best",
+        "bv*+ba/b",
+        "bestvideo*+bestaudio*/best",
+        "best/bestvideo+bestaudio",
         "best[ext=mp4]/best",
         "18/best",
     )
     last_error: yt_dlp.utils.DownloadError | None = None
+    saw_format_unavailable = False
+    saw_stream_forbidden = False
 
     for format_spec in format_candidates:
         ydl_opts = dict(ydl_base_opts)
@@ -265,21 +272,44 @@ def download_video(url: str, output_path: str) -> str:
                     "Provide cookies.txt via YTDLP_COOKIES_FILE."
                 ) from exc
             if "http error 403" in normalized_message or "forbidden" in normalized_message:
-                raise VideoDownloadError(
-                    "YouTube denied media stream access (HTTP 403). "
-                    "Re-export fresh cookies.txt for youtube.com or upload the video file manually."
-                ) from exc
+                saw_stream_forbidden = True
+                logger.warning(
+                    "yt-dlp format attempt failed with HTTP 403: url=%s format=%s",
+                    normalized_url,
+                    format_spec,
+                )
+                continue
             if (
                 "requested format is not available" in normalized_message
                 or "only images are available" in normalized_message
             ):
-                raise VideoDownloadError(
-                    "YouTube did not provide downloadable video streams for this URL in the current environment. "
-                    "Try another video/cookies/network, or upload the file manually."
-                ) from exc
+                saw_format_unavailable = True
+                logger.warning(
+                    "yt-dlp requested format unavailable: url=%s format=%s",
+                    normalized_url,
+                    format_spec,
+                )
+                continue
+            logger.warning(
+                "yt-dlp download attempt failed: url=%s format=%s error=%s",
+                normalized_url,
+                format_spec,
+                str(exc),
+            )
             continue
 
     if last_error is not None:
+        if saw_format_unavailable:
+            raise VideoDownloadError(
+                "YouTube did not provide the requested media formats in the current environment "
+                "after trying fallback format candidates. "
+                "Try fresh cookies, another network/video, or upload the file manually."
+            ) from last_error
+        if saw_stream_forbidden:
+            raise VideoDownloadError(
+                "YouTube denied media stream access (HTTP 403) for all fallback format attempts. "
+                "Re-export fresh cookies.txt for youtube.com or upload the file manually."
+            ) from last_error
         raise VideoDownloadError(f"Unable to download video from URL: {normalized_url}") from last_error
 
     raise VideoDownloadError("Video download finished but output file was not found")

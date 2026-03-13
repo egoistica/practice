@@ -17,6 +17,8 @@ from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureS
 from app.models.summary import Summary
 from app.models.transcript import Transcript
 from app.services.llm_service import (
+    LLMResponseParseError,
+    LLMServiceError,
     merge_graph_data,
     run_enrichment_agent,
     run_entity_graph_agent,
@@ -673,6 +675,30 @@ def _broadcast_realtime_event(lecture_uuid: uuid.UUID, event_type: str, payload:
         )
 
 
+def _run_entity_graph_agent_safe(
+    *,
+    lecture_uuid: uuid.UUID,
+    lecture_text: str,
+    selected_entities: list[str] | None,
+    enrichment_enabled: bool,
+    context: str,
+) -> dict[str, Any]:
+    try:
+        return run_entity_graph_agent(
+            lecture_text=lecture_text,
+            selected_entities=selected_entities,
+            enrichment_enabled=enrichment_enabled,
+            llm_config={},
+        )
+    except (LLMServiceError, LLMResponseParseError, ValueError, TypeError):
+        logger.exception(
+            "Entity graph agent failed, fallback to empty graph lecture_id=%s context=%s",
+            lecture_uuid,
+            context,
+        )
+        return {"nodes": [], "edges": []}
+
+
 def _run_realtime_enrichment(
     lecture_uuid: uuid.UUID,
     lecture_title: str,
@@ -716,11 +742,12 @@ def _run_realtime_enrichment(
             },
         )
 
-        entities_payload = run_entity_graph_agent(
+        entities_payload = _run_entity_graph_agent_safe(
+            lecture_uuid=lecture_uuid,
             lecture_text=str(chunk.get("text", "")),
             selected_entities=selected_entities,
             enrichment_enabled=False,
-            llm_config={},
+            context=f"realtime_chunk_{index}",
         )
         merged_nodes, merged_edges = _run_async(
             _merge_entity_graph_async(
@@ -816,11 +843,12 @@ def _run_standard_enrichment_from_transcript(
             timecode_end=summary_end,
         )
     )
-    entities_payload = run_entity_graph_agent(
+    entities_payload = _run_entity_graph_agent_safe(
+        lecture_uuid=lecture_uuid,
         lecture_text=full_text,
         selected_entities=selected_entities,
         enrichment_enabled=enrichment_enabled,
-        llm_config={},
+        context="standard_enrichment",
     )
     _run_async(
         _upsert_entity_graph_async(
@@ -1145,11 +1173,12 @@ def entity_graph_agent_task(self, lecture_id: str, selected_entities: list[str] 
         if not transcript_full_text:
             raise ValueError("Transcript text is empty")
 
-        entities_payload = run_entity_graph_agent(
+        entities_payload = _run_entity_graph_agent_safe(
+            lecture_uuid=lecture_uuid,
             lecture_text=transcript_full_text,
             selected_entities=selected_entities,
             enrichment_enabled=False,
-            llm_config={},
+            context="entity_graph_agent_task",
         )
         _run_async(
             _upsert_entity_graph_async(
