@@ -488,12 +488,106 @@ def _run_llm_completion(
         request_kwargs.update(safe_extra_kwargs)
 
     try:
-        response = completion(**request_kwargs)
+        response = _run_completion_with_provider_fallback(request_cfg, llm_config, request_kwargs)
     except Exception as exc:  # pragma: no cover - runtime/provider specific
         raise LLMServiceError(
             f"LiteLLM request failed for provider={request_cfg['provider']} model={request_cfg['model']}"
         ) from exc
     return _extract_content(response)
+
+
+def _run_completion_with_provider_fallback(
+    request_cfg: dict[str, str | None],
+    llm_config: dict[str, Any],
+    request_kwargs: dict[str, Any],
+) -> Any:
+    provider = str(request_cfg.get("provider") or "").strip().lower()
+    if provider != "ollama":
+        return completion(**request_kwargs)
+
+    model_candidates = _resolve_ollama_model_candidates(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+    )
+    last_exc: Exception | None = None
+
+    for index, model_name in enumerate(model_candidates):
+        attempt_kwargs = dict(request_kwargs)
+        attempt_kwargs["model"] = model_name
+        try:
+            return completion(**attempt_kwargs)
+        except Exception as exc:  # pragma: no cover - runtime/provider specific
+            last_exc = exc
+            has_next = index < len(model_candidates) - 1
+            if not has_next:
+                raise
+            if not _is_ollama_memory_error(exc):
+                raise
+            logger.warning(
+                "Ollama model fallback triggered: model=%s failed due to memory constraints, trying next",
+                model_name,
+            )
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Ollama fallback chain is empty")
+
+
+def _resolve_ollama_model_candidates(
+    request_cfg: dict[str, str | None],
+    llm_config: dict[str, Any],
+) -> list[str]:
+    primary = _normalize_ollama_model_name(str(request_cfg.get("model") or "").strip())
+    if not primary:
+        primary = _normalize_ollama_model_name(str(settings.LLM_MODEL).strip())
+    env_fallback = _parse_ollama_model_list(settings.OLLAMA_FALLBACK_MODELS)
+    config_fallback = _parse_ollama_model_list(llm_config.get("fallback_models"))
+    merged = [primary, *config_fallback, *env_fallback]
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in merged:
+        normalized = _normalize_ollama_model_name(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _parse_ollama_model_list(raw_value: Any) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        return [part.strip() for part in raw_value.split(",") if part.strip()]
+    if isinstance(raw_value, (list, tuple)):
+        values: list[str] = []
+        for item in raw_value:
+            text = str(item or "").strip()
+            if text:
+                values.append(text)
+        return values
+    return []
+
+
+def _normalize_ollama_model_name(model_name: str) -> str:
+    normalized = str(model_name or "").strip()
+    if not normalized:
+        return ""
+    if normalized.startswith("ollama/"):
+        return normalized
+    return f"ollama/{normalized}"
+
+
+def _is_ollama_memory_error(exc: Exception) -> bool:
+    error_text = str(exc).lower()
+    markers = (
+        "requires more system memory",
+        "not enough memory",
+        "insufficient memory",
+        "out of memory",
+    )
+    return any(marker in error_text for marker in markers)
 
 
 def _extract_content(response: Any) -> str:

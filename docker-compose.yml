@@ -52,6 +52,8 @@ services:
       YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
       LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
       LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_FALLBACK_MODELS: ${OLLAMA_FALLBACK_MODELS:-}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
       YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
       YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
@@ -88,6 +90,8 @@ services:
       YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
       LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
       LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_FALLBACK_MODELS: ${OLLAMA_FALLBACK_MODELS:-}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
       YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
       YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
