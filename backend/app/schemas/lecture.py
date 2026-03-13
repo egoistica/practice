@@ -16,6 +16,7 @@ class CreateLectureRequest(BaseModel):
     source_type: LectureSourceType
     source_url: AnyHttpUrl | None = None
     selected_entities: list[str] | None = None
+    enrichment_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_source_fields(self) -> "CreateLectureRequest":

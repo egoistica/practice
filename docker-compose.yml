@@ -37,19 +37,6 @@ services:
       timeout: 5s
       retries: 5
 
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-
   backend:
     build:
       context: ./backend
@@ -60,9 +47,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_MODEL: ${LLM_MODEL:-qwen2.5:0.5b}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
+      YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
+      YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
+      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
+      LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
       YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
       YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
@@ -83,8 +72,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
 
   celery_worker:
     build:
@@ -96,9 +83,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_MODEL: ${LLM_MODEL:-qwen2.5:0.5b}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
+      YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
+      YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
+      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
+      LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
       YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
       YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
@@ -111,8 +100,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
 
   frontend:
@@ -152,5 +139,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  ollama_data:
   frontend_node_modules:

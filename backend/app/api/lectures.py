@@ -390,6 +390,7 @@ async def parse_create_lecture_request(
     source_type: LectureSourceType = Form(...),
     source_url: str | None = Form(default=None),
     selected_entities: str | None = Form(default=None),
+    enrichment_enabled: bool = Form(default=False),
 ) -> CreateLectureRequest:
     normalized_title = title.strip()
     normalized_source_url = source_url.strip() if source_url else None
@@ -402,6 +403,7 @@ async def parse_create_lecture_request(
             source_type=source_type,
             source_url=normalized_source_url,
             selected_entities=entities,
+            enrichment_enabled=enrichment_enabled,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -483,6 +485,12 @@ async def create_lecture(
             user.id,
             payload.selected_entities,
         )
+    logger.info(
+        "lecture_processing_options lecture_id=%s user_id=%s enrichment_enabled=%s",
+        lecture.id,
+        user.id,
+        payload.enrichment_enabled,
+    )
 
     await broadcast_progress(
         lecture.id,
@@ -491,7 +499,12 @@ async def create_lecture(
     )
 
     try:
-        await asyncio.to_thread(process_lecture_chain.delay, str(lecture.id), payload.selected_entities)
+        await asyncio.to_thread(
+            process_lecture_chain.delay,
+            str(lecture.id),
+            payload.selected_entities,
+            payload.enrichment_enabled,
+        )
     except Exception:
         lecture.status = LectureStatus.ERROR
         lecture.error_message = "Failed to schedule lecture processing"

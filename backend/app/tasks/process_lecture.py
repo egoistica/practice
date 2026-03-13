@@ -16,7 +16,13 @@ from app.models.entity_graph import EntityGraph
 from app.models.lecture import Lecture, LectureMode, LectureSourceType, LectureStatus
 from app.models.summary import Summary
 from app.models.transcript import Transcript
-from app.services.llm_service import extract_entities, merge_graph_data, summarize_segment
+from app.services.llm_service import (
+    merge_graph_data,
+    run_enrichment_agent,
+    run_entity_graph_agent,
+    run_final_summary_agent,
+    run_summary_agent,
+)
 from app.services.progress_service import broadcast_lecture_event_sync, broadcast_progress_sync
 from app.services.text_processing import segment_text
 from app.services.transcription_service import transcribe_audio
@@ -405,7 +411,12 @@ def _segment_placeholders(segmented_blocks: list[dict[str, Any]]) -> list[dict[s
     return placeholders
 
 
-def _aggregate_summary_blocks(segmented_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _aggregate_summary_blocks(
+    segmented_blocks: list[dict[str, Any]],
+    *,
+    lecture_title: str,
+    mode: str,
+) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for block in segmented_blocks:
         if not isinstance(block, dict):
@@ -416,7 +427,12 @@ def _aggregate_summary_blocks(segmented_blocks: list[dict[str, Any]]) -> list[di
 
         timecode_start = block.get("timecode_start")
         timecode_end = block.get("timecode_end")
-        summary_payload = summarize_segment(block_text, llm_config={})
+        summary_payload = run_summary_agent(
+            lecture_text=block_text,
+            lecture_title=lecture_title,
+            mode=mode,
+            llm_config={},
+        )
         for item in summary_payload.get("blocks", []):
             if not isinstance(item, dict):
                 continue
@@ -513,11 +529,21 @@ def _has_usable_realtime_timestamps(segments: list[dict[str, Any]]) -> bool:
     )
 
 
-def _build_chunk_summary_blocks(chunk: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_chunk_summary_blocks(
+    chunk: dict[str, Any],
+    *,
+    lecture_title: str,
+    mode: str,
+) -> list[dict[str, Any]]:
     chunk_text = str(chunk.get("text", "")).strip()
     if not chunk_text:
         return []
-    summary_payload = summarize_segment(chunk_text, llm_config={})
+    summary_payload = run_summary_agent(
+        lecture_text=chunk_text,
+        lecture_title=lecture_title,
+        mode=mode,
+        llm_config={},
+    )
     blocks: list[dict[str, Any]] = []
     for item in summary_payload.get("blocks", []):
         if not isinstance(item, dict):
@@ -561,6 +587,81 @@ def _build_fallback_summary_blocks(
     ]
 
 
+def _summary_key(block: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(block.get("title", "")).strip().lower(),
+        str(block.get("text", "")).strip().lower(),
+        str(block.get("type", "")).strip().lower(),
+    )
+
+
+def _merge_summary_blocks(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = [item for item in existing if isinstance(item, dict)]
+    seen = {_summary_key(item) for item in merged}
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        key = _summary_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _convert_extra_blocks_to_summary(extra_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for item in extra_blocks:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        text = str(item.get("text", "")).strip()
+        related_to = str(item.get("related_to", "")).strip()
+        if not title or not text:
+            continue
+        if related_to:
+            text = f"{text}\n\nСвязано с: {related_to}"
+        converted.append(
+            {
+                "title": title,
+                "text": text,
+                "type": "thought",
+                "timecode_start": None,
+                "timecode_end": None,
+                "enriched": True,
+            }
+        )
+    return converted
+
+
+def _finalize_summary_blocks(
+    current_blocks: list[dict[str, Any]],
+    final_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for block in current_blocks:
+        if not isinstance(block, dict):
+            continue
+        by_key[_summary_key(block)] = block
+
+    finalized: list[dict[str, Any]] = []
+    for block in final_blocks:
+        if not isinstance(block, dict):
+            continue
+        base = by_key.get(_summary_key(block), {})
+        finalized.append(
+            {
+                "title": str(block.get("title", "")).strip() or "Блок",
+                "text": str(block.get("text", "")).strip(),
+                "type": str(block.get("type", "thought")).strip() or "thought",
+                "timecode_start": base.get("timecode_start"),
+                "timecode_end": base.get("timecode_end"),
+                "enriched": bool(base.get("enriched", False)),
+            }
+        )
+    return [item for item in finalized if item.get("text")]
+
+
 def _broadcast_realtime_event(lecture_uuid: uuid.UUID, event_type: str, payload: dict[str, object]) -> None:
     try:
         broadcast_lecture_event_sync(lecture_uuid, event_type, payload)
@@ -574,6 +675,8 @@ def _broadcast_realtime_event(lecture_uuid: uuid.UUID, event_type: str, payload:
 
 def _run_realtime_enrichment(
     lecture_uuid: uuid.UUID,
+    lecture_title: str,
+    mode: str,
     segments: list[dict[str, Any]],
     selected_entities: list[str] | None,
 ) -> None:
@@ -583,7 +686,11 @@ def _run_realtime_enrichment(
 
     total = len(chunks)
     for index, chunk in enumerate(chunks, start=1):
-        summary_blocks = _build_chunk_summary_blocks(chunk)
+        summary_blocks = _build_chunk_summary_blocks(
+            chunk,
+            lecture_title=lecture_title,
+            mode=mode,
+        )
         if not summary_blocks:
             logger.warning(
                 "Empty realtime summary blocks, using fallback lecture_id=%s chunk=%s/%s",
@@ -609,9 +716,10 @@ def _run_realtime_enrichment(
             },
         )
 
-        entities_payload = extract_entities(
-            str(chunk.get("text", "")),
+        entities_payload = run_entity_graph_agent(
+            lecture_text=str(chunk.get("text", "")),
             selected_entities=selected_entities,
+            enrichment_enabled=False,
             llm_config={},
         )
         merged_nodes, merged_edges = _run_async(
@@ -648,14 +756,26 @@ def _run_realtime_enrichment(
 
 def _run_standard_enrichment_from_transcript(
     lecture_uuid: uuid.UUID,
+    lecture_title: str,
+    mode: str,
     transcript_segments: list[dict[str, Any]],
     full_text: str,
     selected_entities: list[str] | None,
+    enrichment_enabled: bool,
 ) -> None:
     segmented_blocks = segment_text(full_text, transcript_segments)
-    summary_blocks = _aggregate_summary_blocks(segmented_blocks)
+    summary_blocks = _aggregate_summary_blocks(
+        segmented_blocks,
+        lecture_title=lecture_title,
+        mode=mode,
+    )
     if not summary_blocks:
-        fallback = summarize_segment(full_text, llm_config={})
+        fallback = run_summary_agent(
+            lecture_text=full_text,
+            lecture_title=lecture_title,
+            mode=mode,
+            llm_config={},
+        )
         summary_blocks = list(fallback.get("blocks", []))
     if not summary_blocks:
         normalized_segments = _normalize_transcript_segments(transcript_segments)
@@ -667,6 +787,26 @@ def _run_standard_enrichment_from_transcript(
             timecode_end=fallback_end,
         )
 
+    if enrichment_enabled:
+        enrichment_payload = run_enrichment_agent(
+            lecture_text=full_text,
+            summary_blocks=summary_blocks,
+            llm_config={},
+        )
+        extra_summary_blocks = _convert_extra_blocks_to_summary(
+            list(enrichment_payload.get("extra_blocks", []))
+        )
+        summary_blocks = _merge_summary_blocks(summary_blocks, extra_summary_blocks)
+
+    final_payload = run_final_summary_agent(
+        summary_blocks=summary_blocks,
+        lecture_title=lecture_title,
+        llm_config={},
+    )
+    final_blocks = list(final_payload.get("final_summary", {}).get("blocks", []))
+    if final_blocks:
+        summary_blocks = _finalize_summary_blocks(summary_blocks, final_blocks)
+
     summary_start, summary_end = _timecode_range(summary_blocks)
     _run_async(
         _upsert_summary_async(
@@ -676,9 +816,10 @@ def _run_standard_enrichment_from_transcript(
             timecode_end=summary_end,
         )
     )
-    entities_payload = extract_entities(
-        full_text,
+    entities_payload = run_entity_graph_agent(
+        lecture_text=full_text,
         selected_entities=selected_entities,
+        enrichment_enabled=enrichment_enabled,
         llm_config={},
     )
     _run_async(
@@ -708,6 +849,7 @@ def _run_standard_enrichment_from_transcript(
             "timecode_end": synthetic_timecode_end,
             "blocks": summary_blocks,
             "fallback": True,
+            "enrichment_enabled": enrichment_enabled,
         },
     )
     _broadcast_realtime_event(
@@ -728,7 +870,12 @@ def _run_standard_enrichment_from_transcript(
 
 
 @shared_task(bind=True, name="lectures.process_lecture_chain")
-def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | None = None) -> dict[str, Any]:
+def process_lecture_chain(
+    self,
+    lecture_id: str,
+    selected_entities: list[str] | None = None,
+    enrichment_enabled: bool = False,
+) -> dict[str, Any]:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
         claimed, _is_realtime = _run_async(_claim_lecture_for_processing_async(lecture_uuid))
@@ -742,15 +889,23 @@ def process_lecture_chain(self, lecture_id: str, selected_entities: list[str] | 
             logger.exception("Failed to broadcast claimed processing state lecture_id=%s", lecture_uuid)
 
         _run_async(_reset_processing_artifacts_async(lecture_uuid))
-        workflow = chain(
+        workflow_steps = [
             download_video_task.s(str(lecture_uuid)),
             extract_audio_task.s(),
-            transcribe_task.s(selected_entities),
+            transcribe_task.s(selected_entities, enrichment_enabled),
             segment_text_task.s(),
-            summarize_task.s(),
-            extract_entities_task.s(selected_entities),
-            save_results_task.s(),
+            summary_agent_task.s(),
+            entity_graph_agent_task.s(selected_entities),
+        ]
+        if enrichment_enabled:
+            workflow_steps.append(enrichment_agent_task.s())
+        workflow_steps.extend(
+            [
+                final_summary_agent_task.s(),
+                save_results_task.s(),
+            ]
         )
+        workflow = chain(*workflow_steps)
         chain_result = workflow.apply_async()
         return {"lecture_id": str(lecture_uuid), "chain_id": chain_result.id, "status": "scheduled"}
     except Exception as exc:
@@ -827,7 +982,12 @@ def extract_audio_task(self, lecture_id: str) -> str:
 
 
 @shared_task(bind=True, name="lectures.transcribe")
-def transcribe_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
+def transcribe_task(
+    self,
+    lecture_id: str,
+    selected_entities: list[str] | None = None,
+    enrichment_enabled: bool = False,
+) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
         lecture = _get_lecture_sync(lecture_uuid)
@@ -851,17 +1011,26 @@ def transcribe_task(self, lecture_id: str, selected_entities: list[str] | None =
 
         if _is_realtime_lecture(lecture):
             if _has_usable_realtime_timestamps(segments):
-                _run_realtime_enrichment(lecture_uuid, segments, selected_entities)
+                _run_realtime_enrichment(
+                    lecture_uuid,
+                    lecture_title=lecture.title,
+                    mode=LectureMode.REALTIME.value,
+                    segments=segments,
+                    selected_entities=selected_entities,
+                )
             else:
                 logger.warning(
                     "Realtime fallback to standard enrichment due to missing/invalid timestamps lecture_id=%s",
                     lecture_uuid,
                 )
                 _run_standard_enrichment_from_transcript(
-                    lecture_uuid,
-                    segments,
-                    full_text,
-                    selected_entities,
+                    lecture_uuid=lecture_uuid,
+                    lecture_title=lecture.title,
+                    mode=LectureMode.INSTANT.value,
+                    transcript_segments=segments,
+                    full_text=full_text,
+                    selected_entities=selected_entities,
+                    enrichment_enabled=enrichment_enabled,
                 )
 
         return str(lecture_uuid)
@@ -902,31 +1071,39 @@ def segment_text_task(self, lecture_id: str) -> str:
         raise
 
 
-@shared_task(bind=True, name="lectures.summarize")
-def summarize_task(self, lecture_id: str) -> str:
+@shared_task(bind=True, name="lectures.summary_agent")
+def summary_agent_task(self, lecture_id: str) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
         lecture = _get_lecture_sync(lecture_uuid)
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
 
+        transcript_segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
         summary_content = _run_async(_get_summary_content_async(lecture_uuid))
         segmented_blocks = [
             item for item in summary_content if isinstance(item, dict) and item.get("type") == SEGMENT_BLOCK_TYPE
         ]
 
         if not segmented_blocks:
-            transcript_segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
             segmented_blocks = segment_text(transcript_full_text, transcript_segments)
 
-        summary_blocks = _aggregate_summary_blocks(segmented_blocks)
+        summary_blocks = _aggregate_summary_blocks(
+            segmented_blocks,
+            lecture_title=lecture.title,
+            mode=LectureMode.INSTANT.value,
+        )
         if not summary_blocks:
-            _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
-            fallback = summarize_segment(transcript_full_text, llm_config={})
+            fallback = run_summary_agent(
+                lecture_text=transcript_full_text,
+                lecture_title=lecture.title,
+                mode=LectureMode.INSTANT.value,
+                llm_config={},
+            )
             summary_blocks = list(fallback.get("blocks", []))
         if not summary_blocks:
             logger.warning(
-                "Empty summary blocks in summarize_task after fallback, using placeholder lecture_id=%s",
+                "Empty summary blocks in summary_agent_task after fallback, using placeholder lecture_id=%s",
                 lecture_uuid,
             )
             summary_blocks = _build_fallback_summary_blocks(
@@ -947,17 +1124,17 @@ def summarize_task(self, lecture_id: str) -> str:
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
-            progress=80,
+            progress=75,
             publish_progress=True,
         )
         return str(lecture_uuid)
     except Exception as exc:
-        _mark_lecture_error(lecture_uuid, exc, "summarize_task")
+        _mark_lecture_error(lecture_uuid, exc, "summary_agent_task")
         raise
 
 
-@shared_task(bind=True, name="lectures.extract_entities")
-def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
+@shared_task(bind=True, name="lectures.entity_graph_agent")
+def entity_graph_agent_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
     lecture_uuid = _parse_lecture_uuid(lecture_id)
     try:
         lecture = _get_lecture_sync(lecture_uuid)
@@ -968,9 +1145,10 @@ def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | 
         if not transcript_full_text:
             raise ValueError("Transcript text is empty")
 
-        entities_payload = extract_entities(
-            transcript_full_text,
+        entities_payload = run_entity_graph_agent(
+            lecture_text=transcript_full_text,
             selected_entities=selected_entities,
+            enrichment_enabled=False,
             llm_config={},
         )
         _run_async(
@@ -983,13 +1161,129 @@ def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | 
         _update_lecture_state(
             lecture_uuid,
             status=LectureStatus.PROCESSING,
+            progress=85,
+            publish_progress=True,
+        )
+        return str(lecture_uuid)
+    except Exception as exc:
+        _mark_lecture_error(lecture_uuid, exc, "entity_graph_agent_task")
+        raise
+
+
+@shared_task(bind=True, name="lectures.enrichment_agent")
+def enrichment_agent_task(self, lecture_id: str) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
+    try:
+        lecture = _get_lecture_sync(lecture_uuid)
+        if _is_realtime_lecture(lecture):
+            return str(lecture_uuid)
+
+        _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
+        summary_content = _run_async(_get_summary_content_async(lecture_uuid))
+        summary_blocks = [
+            item
+            for item in summary_content
+            if isinstance(item, dict) and item.get("type") != SEGMENT_BLOCK_TYPE
+        ]
+        if not summary_blocks:
+            return str(lecture_uuid)
+
+        enrichment_payload = run_enrichment_agent(
+            lecture_text=transcript_full_text,
+            summary_blocks=summary_blocks,
+            llm_config={},
+        )
+        extra_summary_blocks = _convert_extra_blocks_to_summary(
+            list(enrichment_payload.get("extra_blocks", []))
+        )
+        merged_blocks = _merge_summary_blocks(summary_blocks, extra_summary_blocks)
+        summary_start, summary_end = _timecode_range(merged_blocks)
+        _run_async(
+            _upsert_summary_async(
+                lecture_uuid,
+                content=merged_blocks,
+                timecode_start=summary_start,
+                timecode_end=summary_end,
+            )
+        )
+        _update_lecture_state(
+            lecture_uuid,
+            status=LectureStatus.PROCESSING,
             progress=90,
             publish_progress=True,
         )
         return str(lecture_uuid)
     except Exception as exc:
-        _mark_lecture_error(lecture_uuid, exc, "extract_entities_task")
+        _mark_lecture_error(lecture_uuid, exc, "enrichment_agent_task")
         raise
+
+
+@shared_task(bind=True, name="lectures.final_summary_agent")
+def final_summary_agent_task(self, lecture_id: str) -> str:
+    lecture_uuid = _parse_lecture_uuid(lecture_id)
+    try:
+        lecture = _get_lecture_sync(lecture_uuid)
+        if _is_realtime_lecture(lecture):
+            return str(lecture_uuid)
+
+        summary_content = _run_async(_get_summary_content_async(lecture_uuid))
+        summary_blocks = [
+            item
+            for item in summary_content
+            if isinstance(item, dict) and item.get("type") != SEGMENT_BLOCK_TYPE
+        ]
+        if not summary_blocks:
+            raise ValueError("Summary blocks are empty before final summary agent")
+
+        final_payload = run_final_summary_agent(
+            summary_blocks=summary_blocks,
+            lecture_title=lecture.title,
+            llm_config={},
+        )
+        final_blocks = list(final_payload.get("final_summary", {}).get("blocks", []))
+        finalized_blocks = _finalize_summary_blocks(summary_blocks, final_blocks)
+        if not finalized_blocks:
+            raise ValueError("Final summary agent returned empty blocks")
+
+        summary_start, summary_end = _timecode_range(finalized_blocks)
+        _run_async(
+            _upsert_summary_async(
+                lecture_uuid,
+                content=finalized_blocks,
+                timecode_start=summary_start,
+                timecode_end=summary_end,
+            )
+        )
+        _update_lecture_state(
+            lecture_uuid,
+            status=LectureStatus.PROCESSING,
+            progress=95,
+            publish_progress=True,
+        )
+        return str(lecture_uuid)
+    except Exception as exc:
+        _mark_lecture_error(lecture_uuid, exc, "final_summary_agent_task")
+        raise
+
+
+@shared_task(bind=True, name="lectures.summarize")
+def summarize_task(self, lecture_id: str) -> str:
+    return summary_agent_task.run(lecture_id)
+
+
+@shared_task(bind=True, name="lectures.extract_entities")
+def extract_entities_task(self, lecture_id: str, selected_entities: list[str] | None = None) -> str:
+    return entity_graph_agent_task.run(lecture_id, selected_entities)
+
+
+@shared_task(bind=True, name="lectures.finalize_enrichment")
+def finalize_enrichment_task(self, lecture_id: str) -> str:
+    return enrichment_agent_task.run(lecture_id)
+
+
+@shared_task(bind=True, name="lectures.finalize_summary")
+def finalize_summary_task(self, lecture_id: str) -> str:
+    return final_summary_agent_task.run(lecture_id)
 
 
 @shared_task(bind=True, name="lectures.save_results")

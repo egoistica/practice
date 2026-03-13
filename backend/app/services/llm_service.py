@@ -48,6 +48,7 @@ ENRICH_SYSTEM_PROMPT = (
     "Добавляй только новые релевантные узлы и связи; существующие не дублируй."
 )
 ALLOWED_BLOCK_TYPES = {"thought", "definition", "date", "conclusion"}
+ALLOWED_ENTITY_NODE_TYPES = {"term", "technology", "concept", "person"}
 DEFAULT_EDGE_LABEL = "related_to"
 RESERVED_COMPLETION_KWARGS = {
     "messages",
@@ -61,7 +62,59 @@ RESERVED_COMPLETION_KWARGS = {
     "openai_api_key",
     "anthropic_api_key",
     "azure_api_key",
+    "custom_llm_provider",
+    "project",
 }
+SUMMARY_AGENT_PROMPT = (
+    "Ты помощник по созданию конспектов лекций.\n"
+    "Верни только валидный JSON строго по заданной схеме.\n"
+    "Не используй markdown.\n"
+    "Не добавляй пояснений вне JSON.\n\n"
+    "Каждый блок ОБЯЗАТЕЛЬНО должен содержать поля: title, text, type.\n"
+    "Поле type ОБЯЗАТЕЛЬНО должно быть одним из: thought, definition, date, conclusion.\n"
+    "Если не подходит ни один специальный тип, используй thought.\n"
+    "Выделяй главные мысли, определения, даты и выводы.\n"
+    "Разбивай результат на логические блоки.\n"
+    "Если текст шумный после распознавания речи, убирай мусор и сохраняй только полезную информацию.\n"
+)
+ENTITY_GRAPH_AGENT_PROMPT = (
+    "Ты помощник по извлечению сущностей из лекций.\n"
+    "Верни только валидный JSON строго по заданной схеме.\n"
+    "Не используй markdown.\n"
+    "Не добавляй пояснений вне JSON.\n\n"
+    "Нужно извлечь сущности и связи между сущностями.\n"
+    "Возвращай результат только в формате nodes и edges.\n"
+    "Не используй поля entities, relations, types или другие альтернативные структуры.\n"
+    "Каждый узел должен иметь поля id, label, type.\n"
+    "Тип узла должен быть одним из: term, technology, concept, person.\n"
+    "Каждая связь должна иметь поля source, target, label.\n"
+    "source и target должны ссылаться на id узлов.\n"
+    "Если не уверен в типе сущности, используй concept.\n"
+)
+ENRICHMENT_AGENT_PROMPT = (
+    "Ты помощник по расширению учебного материала лекции.\n"
+    "Верни только валидный JSON строго по заданной схеме.\n"
+    "Не используй markdown.\n"
+    "Не добавляй пояснений вне JSON.\n\n"
+    "Добавь только связанную и полезную информацию, которой не было напрямую в лекции.\n"
+    "Дополняй конспект дополнительными блоками без повторов.\n"
+    "Возвращай результат только в формате extra_blocks.\n"
+    "Каждый блок extra_blocks должен иметь поля title, text, related_to.\n"
+    "Если полезного расширения нет, верни пустой массив.\n"
+)
+FINAL_SUMMARY_AGENT_PROMPT = (
+    "Ты помощник по финальной сборке конспекта лекции.\n"
+    "Верни только валидный JSON строго по заданной схеме.\n"
+    "Не используй markdown.\n"
+    "Не добавляй пояснений вне JSON.\n\n"
+    "Объедини готовые блоки конспекта в итоговый структурированный конспект.\n"
+    "Сохрани основные мысли, определения, даты и выводы.\n"
+    "Убери повторы и не теряй важную информацию.\n"
+    "Возвращай результат только в формате final_summary.\n"
+    "В final_summary обязательно должны быть поля title и blocks.\n"
+    "Каждый блок должен содержать title, text, type.\n"
+    "Поле type: thought, definition, date, conclusion.\n"
+)
 
 
 class LLMServiceError(RuntimeError):
@@ -72,22 +125,37 @@ class LLMResponseParseError(LLMServiceError):
     """Raised when LLM response cannot be parsed to expected summary JSON."""
 
 
-def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[str, Any]:
+def run_summary_agent(
+    lecture_text: str,
+    lecture_title: str | None = None,
+    mode: str | None = None,
+    llm_config: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     if llm_config is None:
         llm_config = {}
     if not isinstance(llm_config, dict):
         raise TypeError("llm_config must be a dict")
 
-    normalized_text = text.strip()
+    normalized_text = lecture_text.strip()
     if not normalized_text:
-        raise ValueError("text must not be empty")
+        raise ValueError("lecture_text must not be empty")
 
     request_cfg = _resolve_request_config(llm_config)
-    user_prompt = str(llm_config.get("prompt") or SUMMARY_PROMPT).strip()
+    user_prompt = str(llm_config.get("prompt") or SUMMARY_AGENT_PROMPT).strip()
+    title_value = str(lecture_title or "").strip() or "Untitled lecture"
+    mode_value = str(mode or "").strip() or "instant"
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{user_prompt}\n\nТекст лекции:\n{normalized_text}"},
+        {
+            "role": "user",
+            "content": (
+                f"{user_prompt}\n\n"
+                f"Название лекции: {title_value}\n"
+                f"Режим: {mode_value}\n"
+                f"Текст лекции:\n{normalized_text}"
+            ),
+        },
     ]
 
     raw_content = _run_llm_completion(
@@ -101,9 +169,14 @@ def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[s
     return _parse_summary_payload(raw_content)
 
 
-def extract_entities(
-    text: str,
+def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[str, Any]:
+    return run_summary_agent(text, llm_config=llm_config)
+
+
+def run_entity_graph_agent(
+    lecture_text: str,
     selected_entities: Optional[list[str] | str] = None,
+    enrichment_enabled: bool = False,
     llm_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     if llm_config is None:
@@ -111,13 +184,19 @@ def extract_entities(
     if not isinstance(llm_config, dict):
         raise TypeError("llm_config must be a dict")
 
-    normalized_text = text.strip()
+    normalized_text = lecture_text.strip()
     if not normalized_text:
-        raise ValueError("text must not be empty")
+        raise ValueError("lecture_text must not be empty")
 
     selected_clean = _normalize_selected_entities(selected_entities)
     request_cfg = _resolve_request_config(llm_config)
-    user_prompt = str(llm_config.get("prompt") or _build_entity_prompt(selected_clean)).strip()
+    prompt_base = str(llm_config.get("prompt") or ENTITY_GRAPH_AGENT_PROMPT).strip()
+    selected_hint = ", ".join(selected_clean) if selected_clean else "not provided"
+    user_prompt = (
+        f"{prompt_base}\n"
+        f"selected_entities={selected_hint}\n"
+        f"enrichment_enabled={str(bool(enrichment_enabled)).lower()}"
+    )
 
     messages = [
         {"role": "system", "content": ENTITY_SYSTEM_PROMPT},
@@ -128,10 +207,119 @@ def extract_entities(
         llm_config=llm_config,
         messages=messages,
         default_temperature=0.1,
-        default_max_tokens=1800,
+        default_max_tokens=800,
         default_timeout=90.0,
     )
     return _parse_entities_payload(raw_content, selected_clean)
+
+
+def extract_entities(
+    text: str,
+    selected_entities: Optional[list[str] | str] = None,
+    llm_config: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return run_entity_graph_agent(
+        lecture_text=text,
+        selected_entities=selected_entities,
+        enrichment_enabled=False,
+        llm_config=llm_config,
+    )
+
+
+def run_enrichment_agent(
+    lecture_text: str,
+    summary_blocks: list[dict[str, Any]],
+    llm_config: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    if llm_config is None:
+        llm_config = {}
+    if not isinstance(llm_config, dict):
+        raise TypeError("llm_config must be a dict")
+    if not isinstance(summary_blocks, list):
+        raise TypeError("summary_blocks must be a list")
+
+    normalized_text = lecture_text.strip()
+    if not normalized_text:
+        raise ValueError("lecture_text must not be empty")
+
+    request_cfg = _resolve_request_config(llm_config)
+    user_prompt = str(llm_config.get("prompt") or ENRICHMENT_AGENT_PROMPT).strip()
+    blocks_json = json.dumps(summary_blocks, ensure_ascii=False)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты расширяешь конспект лекции. "
+                "Верни только валидный JSON без markdown. "
+                'Формат: {"extra_blocks":[{"title":"...","text":"...","related_to":"..."}]}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"{user_prompt}\n\n"
+                f"Текст лекции:\n{normalized_text}\n\n"
+                f"Текущие summary blocks:\n{blocks_json}"
+            ),
+        },
+    ]
+    raw_content = _run_llm_completion(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+        messages=messages,
+        default_temperature=0.3,
+        default_max_tokens=800,
+        default_timeout=90.0,
+    )
+    return _parse_extra_blocks_payload(raw_content)
+
+
+def run_final_summary_agent(
+    summary_blocks: list[dict[str, Any]],
+    lecture_title: str | None,
+    llm_config: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    if llm_config is None:
+        llm_config = {}
+    if not isinstance(llm_config, dict):
+        raise TypeError("llm_config must be a dict")
+    if not isinstance(summary_blocks, list):
+        raise TypeError("summary_blocks must be a list")
+
+    request_cfg = _resolve_request_config(llm_config)
+    user_prompt = str(llm_config.get("prompt") or FINAL_SUMMARY_AGENT_PROMPT).strip()
+    title_value = str(lecture_title or "").strip() or "Итоговый конспект"
+    blocks_json = json.dumps(summary_blocks, ensure_ascii=False)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты финально собираешь конспект. "
+                "Верни только валидный JSON без markdown. "
+                'Формат: {"final_summary":{"title":"...","blocks":[{"title":"...","text":"...","type":"thought|definition|date|conclusion"}]}}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"{user_prompt}\n\n"
+                f"Название лекции: {title_value}\n"
+                f"summary_blocks:\n{blocks_json}"
+            ),
+        },
+    ]
+
+    raw_content = _run_llm_completion(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+        messages=messages,
+        default_temperature=0.2,
+        default_max_tokens=1400,
+        default_timeout=120.0,
+    )
+    return _parse_final_summary_payload(raw_content)
 
 
 def enrich_graph(
@@ -185,11 +373,32 @@ def merge_graph_data(
     return _merge_graph_payload(base_nodes, base_edges, incoming_nodes, incoming_edges)
 
 
+def _resolve_yandex_model_uri(model: str, folder_id: str | None) -> str:
+    normalized_model = str(model).strip()
+    if not normalized_model:
+        normalized_model = "yandexgpt-lite/latest"
+
+    if normalized_model.startswith("gpt://"):
+        return normalized_model
+
+    model_suffix = normalized_model.strip("/")
+    if "/" not in model_suffix:
+        model_suffix = f"{model_suffix}/latest"
+
+    if not folder_id:
+        raise LLMServiceError(
+            "YANDEXGPT_FOLDER_ID is required when LLM_MODEL is not full URI "
+            "(expected format: gpt://<folder_id>/<model>/latest)"
+        )
+    return f"gpt://{folder_id}/{model_suffix}"
+
+
 def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]:
     provider = str(llm_config.get("provider") or settings.LLM_PROVIDER).strip().lower()
     model = str(llm_config.get("model") or settings.LLM_MODEL).strip()
     api_base = str(llm_config.get("api_base") or "").strip() or None
     api_key = str(llm_config.get("api_key") or "").strip() or None
+    project = str(llm_config.get("project") or "").strip() or None
 
     if not provider:
         raise LLMServiceError("LLM provider is not configured")
@@ -209,6 +418,22 @@ def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]
                 "OPENAI_API_KEY is required when LLM provider is 'openai'. "
                 "Set OPENAI_API_KEY in environment or pass api_key in llm_config."
             )
+    elif provider == "yandex":
+        if not api_key and settings.YANDEXGPT_API_KEY and settings.YANDEXGPT_API_KEY.strip():
+            api_key = settings.YANDEXGPT_API_KEY.strip()
+        if not api_key:
+            raise LLMServiceError(
+                "YANDEXGPT_API_KEY is required when LLM provider is 'yandex'. "
+                "Set YANDEXGPT_API_KEY in environment or pass api_key in llm_config."
+            )
+
+        folder_id = str(llm_config.get("folder_id") or settings.YANDEXGPT_FOLDER_ID).strip() or None
+        model = _resolve_yandex_model_uri(model, folder_id)
+        project = project or folder_id
+        if not api_base:
+            api_base = str(settings.YANDEXGPT_API_BASE).strip() or None
+        if not api_base:
+            raise LLMServiceError("YANDEXGPT_API_BASE must be set when provider is 'yandex'")
     elif "/" not in model:
         model = f"{provider}/{model}"
 
@@ -217,6 +442,7 @@ def _resolve_request_config(llm_config: dict[str, Any]) -> dict[str, str | None]
         "model": model,
         "api_base": api_base,
         "api_key": api_key,
+        "project": project,
     }
 
 
@@ -242,6 +468,11 @@ def _run_llm_completion(
         request_kwargs["api_base"] = request_cfg["api_base"]
     if request_cfg.get("api_key"):
         request_kwargs["api_key"] = request_cfg["api_key"]
+    if request_cfg.get("provider") == "yandex":
+        # YandexGPT is called via the OpenAI-compatible API surface.
+        request_kwargs["custom_llm_provider"] = "openai"
+        if request_cfg.get("project"):
+            request_kwargs["project"] = request_cfg["project"]
 
     extra_kwargs = llm_config.get("completion_kwargs")
     if isinstance(extra_kwargs, dict):
@@ -362,6 +593,43 @@ def _parse_enrichment_payload(raw_content: str) -> dict[str, list[Any]]:
     return {"nodes": nodes_raw, "edges": edges_raw}
 
 
+def _parse_extra_blocks_payload(raw_content: str) -> dict[str, list[dict[str, str]]]:
+    payload = _load_json_payload(raw_content)
+    if not isinstance(payload, dict):
+        raise LLMResponseParseError("Enrichment agent response JSON must be an object")
+
+    extra_blocks_raw = payload.get("extra_blocks")
+    if not isinstance(extra_blocks_raw, list):
+        raise LLMResponseParseError("Enrichment agent response must contain 'extra_blocks' as a list")
+
+    extra_blocks: list[dict[str, str]] = []
+    for item in extra_blocks_raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        text = str(item.get("text", "")).strip()
+        related_to = str(item.get("related_to", "")).strip()
+        if not title or not text or not related_to:
+            continue
+        extra_blocks.append({"title": title, "text": text, "related_to": related_to})
+
+    return {"extra_blocks": extra_blocks}
+
+
+def _parse_final_summary_payload(raw_content: str) -> dict[str, Any]:
+    payload = _load_json_payload(raw_content)
+    if not isinstance(payload, dict):
+        raise LLMResponseParseError("Final summary response JSON must be an object")
+
+    final_summary_raw = payload.get("final_summary")
+    if not isinstance(final_summary_raw, dict):
+        raise LLMResponseParseError("Final summary response must contain 'final_summary' object")
+
+    title = str(final_summary_raw.get("title", "")).strip() or "Итоговый конспект"
+    blocks = _parse_summary_payload(json.dumps({"blocks": final_summary_raw.get("blocks", [])}, ensure_ascii=False)).get("blocks", [])
+    return {"final_summary": {"title": title, "blocks": blocks}}
+
+
 def _load_json_payload(raw_content: str) -> Any:
     try:
         return json.loads(raw_content)
@@ -403,6 +671,23 @@ def _normalize_block_type(raw_type: Any) -> str:
     normalized = aliases.get(value, value)
     if normalized not in ALLOWED_BLOCK_TYPES:
         return "thought"
+    return normalized
+
+
+def _normalize_entity_type(raw_type: Any) -> str:
+    value = str(raw_type or "").strip().lower()
+    aliases = {
+        "term": "term",
+        "technology": "technology",
+        "tech": "technology",
+        "concept": "concept",
+        "person": "person",
+        "human": "person",
+        "name": "person",
+    }
+    normalized = aliases.get(value, value)
+    if normalized not in ALLOWED_ENTITY_NODE_TYPES:
+        return "concept"
     return normalized
 
 
@@ -458,7 +743,7 @@ def _normalize_nodes(nodes_raw: list[Any]) -> tuple[list[dict[str, Any]], dict[s
             continue
 
         raw_id = str(item.get("id", "")).strip()
-        node_type = str(item.get("type", "")).strip().lower() or "term"
+        node_type = _normalize_entity_type(item.get("type"))
         mentions = _normalize_mentions(item.get("mentions"))
 
         existing = dedup.get(dedupe_key)
@@ -599,7 +884,7 @@ def _register_merged_node(
     normalized = {
         "id": node_id,
         "label": label,
-        "type": str(node.get("type", "")).strip().lower() or "term",
+        "type": _normalize_entity_type(node.get("type")),
         "mentions": _normalize_mentions(node.get("mentions")) if preserve_mentions else [],
         "enriched": enriched,
     }
