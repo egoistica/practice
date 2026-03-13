@@ -47,8 +47,15 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
+      YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
+      YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
+      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
+      LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
+      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
+      YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
+      YTDLP_REMOTE_COMPONENTS: ${YTDLP_REMOTE_COMPONENTS:-ejs:github,ejs:npm}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./backend:/app
@@ -76,8 +83,15 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
+      YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
+      YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
+      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
+      LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
       MEDIA_ROOT: ${MEDIA_ROOT:-/media}
+      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
+      YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
+      YTDLP_REMOTE_COMPONENTS: ${YTDLP_REMOTE_COMPONENTS:-ejs:github,ejs:npm}
     command: celery -A celery_app.celery_app worker --loglevel=info
     volumes:
       - ./backend:/app

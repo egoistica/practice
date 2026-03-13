@@ -55,9 +55,12 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     OPENAI_API_KEY: str = ""
+    YANDEXGPT_API_KEY: str = ""
+    YANDEXGPT_FOLDER_ID: str = ""
+    YANDEXGPT_API_BASE: str = "https://ai.api.cloud.yandex.net/v1"
     TELEGRAM_BOT_TOKEN: str = ""
-    LLM_PROVIDER: str = "openai"
-    LLM_MODEL: str = "gpt-4o-mini"
+    LLM_PROVIDER: str = "yandex"
+    LLM_MODEL: str = "yandexgpt-lite/latest"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     MEDIA_ROOT: str = "/media"
 
@@ -138,6 +141,15 @@ class Settings(BaseSettings):
                     raise RuntimeError(
                         "OPENAI_API_KEY must be set when LLM_PROVIDER=openai outside development/test environments"
                     )
+            if llm_provider == "yandex":
+                yandex_api_key = str(getattr(self, "YANDEXGPT_API_KEY", ""))
+                if not yandex_api_key.strip():
+                    raise RuntimeError(
+                        "YANDEXGPT_API_KEY must be set when LLM_PROVIDER=yandex outside development/test environments"
+                    )
+                yandex_api_base = str(getattr(self, "YANDEXGPT_API_BASE", ""))
+                if not yandex_api_base.strip():
+                    raise RuntimeError("YANDEXGPT_API_BASE must be set when LLM_PROVIDER=yandex")
 
         _ = self.cors_origins_list
         _ = self.cors_credentials_enabled
@@ -176,9 +188,12 @@ def get_settings() -> Settings:
             JWT_ALGORITHM=os.getenv("JWT_ALGORITHM", "HS256"),
             ACCESS_TOKEN_EXPIRE_MINUTES=int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")),
             OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
+            YANDEXGPT_API_KEY=os.getenv("YANDEXGPT_API_KEY", ""),
+            YANDEXGPT_FOLDER_ID=os.getenv("YANDEXGPT_FOLDER_ID", ""),
+            YANDEXGPT_API_BASE=os.getenv("YANDEXGPT_API_BASE", "https://ai.api.cloud.yandex.net/v1"),
             TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            LLM_PROVIDER=os.getenv("LLM_PROVIDER", "openai"),
-            LLM_MODEL=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            LLM_PROVIDER=os.getenv("LLM_PROVIDER", "yandex"),
+            LLM_MODEL=os.getenv("LLM_MODEL", "yandexgpt-lite/latest"),
             OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             MEDIA_ROOT=os.getenv("MEDIA_ROOT", "/media"),
         )

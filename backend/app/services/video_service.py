@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import ipaddress
 import os
 import socket
@@ -8,6 +9,8 @@ from urllib.parse import urlparse
 
 import ffmpeg
 import yt_dlp
+
+logger = logging.getLogger(__name__)
 
 
 class VideoServiceError(RuntimeError):
@@ -28,6 +31,49 @@ BLOCKED_METADATA_NETWORKS = (
     ipaddress.ip_network("169.254.169.254/32"),
     ipaddress.ip_network("fd00:ec2::254/128"),
 )
+
+
+def _resolve_cookiefile() -> str | None:
+    raw_path = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if not raw_path:
+        return None
+
+    cookie_path = Path(raw_path)
+    if not cookie_path.is_absolute():
+        cookie_path = Path.cwd() / cookie_path
+
+    if not cookie_path.exists() or not cookie_path.is_file():
+        raise VideoDownloadError(
+            f"YTDLP cookies file not found: {cookie_path}. "
+            "Set YTDLP_COOKIES_FILE to a valid cookies.txt path."
+        )
+    return str(cookie_path)
+
+
+def _resolve_js_runtimes() -> dict[str, dict[str, str]]:
+    raw_value = os.getenv("YTDLP_JS_RUNTIMES", "node")
+    runtimes: dict[str, dict[str, str]] = {}
+
+    for item in raw_value.split(","):
+        token = item.strip()
+        if not token:
+            continue
+
+        runtime_name, separator, runtime_path = token.partition(":")
+        runtime_name = runtime_name.strip().lower()
+        if not runtime_name:
+            continue
+
+        config: dict[str, str] = {}
+        if separator and runtime_path.strip():
+            config["path"] = runtime_path.strip()
+        runtimes[runtime_name] = config
+    return runtimes
+
+
+def _resolve_remote_components() -> list[str]:
+    raw_value = os.getenv("YTDLP_REMOTE_COMPONENTS", "ejs:github,ejs:npm")
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
 def _decode_ffmpeg_error(exc: ffmpeg.Error) -> str:
@@ -152,40 +198,119 @@ def download_video(url: str, output_path: str) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_template = f"{output.stem}.%(ext)s" if output.suffix else "%(title).180B-%(id)s.%(ext)s"
 
-    ydl_opts = {
-        "format": "bestvideo+bestaudio/best",
+    ydl_base_opts = {
         "noplaylist": True,
         "outtmpl": str(output_dir / output_template),
         "merge_output_format": "mp4",
         "restrictfilenames": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "file_access_retries": 3,
         "quiet": True,
         "no_warnings": True,
         "allowed_extractors": ["default", "-generic"],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web", "ios"],
+            }
+        },
     }
+    cookiefile = _resolve_cookiefile()
+    if cookiefile:
+        ydl_base_opts["cookiefile"] = cookiefile
+    js_runtimes = _resolve_js_runtimes()
+    if js_runtimes:
+        ydl_base_opts["js_runtimes"] = js_runtimes
+    remote_components = _resolve_remote_components()
+    if remote_components:
+        ydl_base_opts["remote_components"] = remote_components
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(normalized_url, download=True)
-            if not isinstance(info, dict):
-                raise VideoDownloadError("Unable to resolve downloaded file metadata")
+    format_candidates = (
+        "bv*+ba/b",
+        "bestvideo*+bestaudio*/best",
+        "best/bestvideo+bestaudio",
+        "best[ext=mp4]/best",
+        "18/best",
+    )
+    last_error: yt_dlp.utils.DownloadError | None = None
+    saw_format_unavailable = False
+    saw_stream_forbidden = False
 
-            candidate_paths: list[Path] = []
-            requested_downloads = info.get("requested_downloads") or []
-            for item in requested_downloads:
-                if isinstance(item, dict) and item.get("filepath"):
-                    candidate_paths.append(Path(item["filepath"]))
+    for format_spec in format_candidates:
+        ydl_opts = dict(ydl_base_opts)
+        ydl_opts["format"] = format_spec
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(normalized_url, download=True)
+                if not isinstance(info, dict):
+                    raise VideoDownloadError("Unable to resolve downloaded file metadata")
 
-            prepared = ydl.prepare_filename(info)
-            candidate_paths.extend([Path(prepared), Path(prepared).with_suffix(".mp4")])
+                candidate_paths: list[Path] = []
+                requested_downloads = info.get("requested_downloads") or []
+                for item in requested_downloads:
+                    if isinstance(item, dict) and item.get("filepath"):
+                        candidate_paths.append(Path(item["filepath"]))
 
-            for candidate in candidate_paths:
-                if candidate.exists():
-                    return str(candidate)
-    except yt_dlp.utils.DownloadError as exc:
-        message = str(exc).lower()
-        if "unsupported url" in message or "unsupported" in message:
-            raise UnsupportedVideoFormatError("Unsupported URL or video format") from exc
-        raise VideoDownloadError(f"Unable to download video from URL: {normalized_url}") from exc
+                prepared = ydl.prepare_filename(info)
+                candidate_paths.extend([Path(prepared), Path(prepared).with_suffix(".mp4")])
+
+                for candidate in candidate_paths:
+                    if candidate.exists():
+                        return str(candidate)
+        except yt_dlp.utils.DownloadError as exc:
+            last_error = exc
+            message = str(exc).lower()
+            normalized_message = message.replace("’", "'")
+            if "unsupported url" in normalized_message or "unsupported" in normalized_message:
+                raise UnsupportedVideoFormatError("Unsupported URL or video format") from exc
+            if (
+                "sign in to confirm you're not a bot" in normalized_message
+                or "confirm you're not a bot" in normalized_message
+            ):
+                raise VideoDownloadError(
+                    "YouTube requires authentication for this video. "
+                    "Provide cookies.txt via YTDLP_COOKIES_FILE."
+                ) from exc
+            if "http error 403" in normalized_message or "forbidden" in normalized_message:
+                saw_stream_forbidden = True
+                logger.warning(
+                    "yt-dlp format attempt failed with HTTP 403: url=%s format=%s",
+                    normalized_url,
+                    format_spec,
+                )
+                continue
+            if (
+                "requested format is not available" in normalized_message
+                or "only images are available" in normalized_message
+            ):
+                saw_format_unavailable = True
+                logger.warning(
+                    "yt-dlp requested format unavailable: url=%s format=%s",
+                    normalized_url,
+                    format_spec,
+                )
+                continue
+            logger.warning(
+                "yt-dlp download attempt failed: url=%s format=%s error=%s",
+                normalized_url,
+                format_spec,
+                str(exc),
+            )
+            continue
+
+    if last_error is not None:
+        if saw_format_unavailable:
+            raise VideoDownloadError(
+                "YouTube did not provide the requested media formats in the current environment "
+                "after trying fallback format candidates. "
+                "Try fresh cookies, another network/video, or upload the file manually."
+            ) from last_error
+        if saw_stream_forbidden:
+            raise VideoDownloadError(
+                "YouTube denied media stream access (HTTP 403) for all fallback format attempts. "
+                "Re-export fresh cookies.txt for youtube.com or upload the file manually."
+            ) from last_error
+        raise VideoDownloadError(f"Unable to download video from URL: {normalized_url}") from last_error
 
     raise VideoDownloadError("Video download finished but output file was not found")
 

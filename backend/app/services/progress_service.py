@@ -8,6 +8,7 @@ from collections import defaultdict
 from contextlib import suppress
 from datetime import datetime, timezone
 
+import redis as redis_sync
 import redis.asyncio as redis
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketDisconnect
@@ -28,6 +29,7 @@ _listener_lock = asyncio.Lock()
 _redis_client: redis.Redis | None = None
 _redis_pubsub = None
 _listener_task: asyncio.Task[None] | None = None
+_redis_sync_client: redis_sync.Redis | None = None
 
 
 def _base_payload(lecture_id: uuid.UUID, event_type: str) -> dict[str, object]:
@@ -109,6 +111,25 @@ async def _publish_redis(payload: dict[str, object]) -> None:
         raise
 
 
+def _get_redis_sync_client() -> redis_sync.Redis:
+    global _redis_sync_client
+    if _redis_sync_client is None:
+        _redis_sync_client = redis_sync.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_sync_client
+
+
+def _publish_redis_sync(payload: dict[str, object]) -> None:
+    try:
+        client = _get_redis_sync_client()
+        client.publish(PROGRESS_CHANNEL, json.dumps(payload))
+    except Exception:
+        logger.exception(
+            "Failed to publish lecture progress to redis (sync) for lecture_id=%s",
+            payload.get("lecture_id"),
+        )
+        raise
+
+
 async def broadcast_progress(
     lecture_id: uuid.UUID,
     progress: int,
@@ -124,7 +145,8 @@ def broadcast_progress_sync(
     progress: int,
     status_value: str | None = None,
 ) -> None:
-    asyncio.run(broadcast_progress(lecture_id, progress, status_value))
+    payload = _progress_payload(lecture_id, progress, status_value)
+    _publish_redis_sync(payload)
 
 
 async def broadcast_lecture_event(
@@ -146,7 +168,12 @@ def broadcast_lecture_event_sync(
     event_type: str,
     event_payload: dict[str, object],
 ) -> None:
-    asyncio.run(broadcast_lecture_event(lecture_id, event_type, event_payload))
+    normalized_type = str(event_type).strip()
+    if not normalized_type:
+        raise ValueError("event_type must not be empty")
+    payload = _base_payload(lecture_id, normalized_type)
+    payload.update(event_payload)
+    _publish_redis_sync(payload)
 
 
 async def _close_redis_pubsub() -> None:
