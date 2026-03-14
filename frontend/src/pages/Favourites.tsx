@@ -23,6 +23,8 @@ type FavouritesResponse = {
 };
 
 const PAGE_LIMIT = 100;
+const favouritesPageQueryKey = (userId: string | undefined) => ["favourites-page", userId] as const;
+const favouritesDashboardQueryKey = (userId: string | undefined) => ["favourites", userId] as const;
 
 async function fetchFavouritesPage(skip: number, limit: number): Promise<FavouritesResponse> {
   const response = await apiClient.get<FavouritesResponse>("/favourites", {
@@ -39,28 +41,46 @@ export default function FavouritesPage() {
   const [items, setItems] = useState<FavouriteLecture[]>([]);
   const [total, setTotal] = useState(0);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
   const userId = user?.user_id;
 
   const favouritesQuery = useQuery({
-    queryKey: ["favourites-page", userId],
+    queryKey: favouritesPageQueryKey(userId),
     enabled: Boolean(user),
     queryFn: async () => fetchFavouritesPage(0, PAGE_LIMIT),
   });
 
   useEffect(() => {
+    setItems([]);
+    setTotal(0);
+    setHasHydrated(false);
+  }, [userId]);
+
+  useEffect(() => {
     if (!favouritesQuery.data) {
       return;
     }
-    setItems(favouritesQuery.data.items);
     setTotal(favouritesQuery.data.total);
-  }, [favouritesQuery.data]);
+    setItems((previous) => {
+      const firstPageItems = favouritesQuery.data.items;
+      if (!hasHydrated || previous.length === 0) {
+        return firstPageItems;
+      }
+
+      const firstPageIds = new Set(firstPageItems.map((item) => item.lecture_id));
+      const tail = previous.slice(firstPageItems.length).filter((item) => !firstPageIds.has(item.lecture_id));
+      return [...firstPageItems, ...tail].slice(0, favouritesQuery.data.total);
+    });
+    setHasHydrated(true);
+  }, [favouritesQuery.data, hasHydrated]);
 
   const removeMutation = useMutation({
     mutationFn: async (lectureId: string) => {
       await apiClient.delete(`/favourites/${lectureId}`);
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["favourites", userId] });
+      await queryClient.invalidateQueries({ queryKey: favouritesPageQueryKey(userId) });
+      await queryClient.invalidateQueries({ queryKey: favouritesDashboardQueryKey(userId) });
     },
   });
 
