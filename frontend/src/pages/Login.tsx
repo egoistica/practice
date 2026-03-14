@@ -29,9 +29,13 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
 
   const canSubmit = useMemo(
-    () => !submitting && username.trim().length > 0 && password.trim().length > 0,
-    [password, submitting, username],
+    () => !isLoading && !submitting && username.trim().length > 0 && password.trim().length > 0,
+    [isLoading, password, submitting, username],
   );
+
+  if (isLoading) {
+    return <p>Loading...</p>;
+  }
 
   if (!isLoading && isAuthenticated) {
     return <Navigate to="/dashboard" replace />;
@@ -39,7 +43,7 @@ export default function LoginPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canSubmit) {
+    if (isLoading || !canSubmit) {
       return;
     }
 
@@ -98,4 +102,3 @@ export default function LoginPage() {
     </section>
   );
 }
-
