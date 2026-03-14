@@ -33,8 +33,53 @@ type FavouritesListResponse = {
   limit: number;
 };
 
-const lecturesQueryKey = ["lectures"];
-const favouritesQueryKey = ["favourites"];
+const PAGE_LIMIT = 100;
+const lecturesQueryKey = (userId: string | undefined) => ["lectures", userId] as const;
+const favouritesQueryKey = (userId: string | undefined) => ["favourites", userId] as const;
+
+async function fetchAllLectures(): Promise<LectureItem[]> {
+  const allItems: LectureItem[] = [];
+  let skip = 0;
+  let total = Number.POSITIVE_INFINITY;
+
+  while (allItems.length < total) {
+    const response = await apiClient.get<LectureListResponse>("/lectures", {
+      params: { skip, limit: PAGE_LIMIT, sort_order: "desc" },
+    });
+    const page = response.data;
+    total = page.total;
+    allItems.push(...page.items);
+
+    if (page.items.length === 0) {
+      break;
+    }
+    skip += page.items.length;
+  }
+
+  return allItems;
+}
+
+async function fetchAllFavourites(): Promise<FavouriteItem[]> {
+  const allItems: FavouriteItem[] = [];
+  let skip = 0;
+  let total = Number.POSITIVE_INFINITY;
+
+  while (allItems.length < total) {
+    const response = await apiClient.get<FavouritesListResponse>("/favourites", {
+      params: { skip, limit: PAGE_LIMIT },
+    });
+    const page = response.data;
+    total = page.total;
+    allItems.push(...page.items);
+
+    if (page.items.length === 0) {
+      break;
+    }
+    skip += page.items.length;
+  }
+
+  return allItems;
+}
 
 function extractErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
@@ -52,28 +97,19 @@ export default function DashboardPage() {
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [togglingLectureId, setTogglingLectureId] = useState<string | null>(null);
+  const [togglingLectureIds, setTogglingLectureIds] = useState<Set<string>>(new Set());
+  const userId = user?.user_id;
 
   const lecturesQuery = useQuery({
-    queryKey: lecturesQueryKey,
+    queryKey: lecturesQueryKey(userId),
     enabled: Boolean(user),
-    queryFn: async () => {
-      const response = await apiClient.get<LectureListResponse>("/lectures", {
-        params: { skip: 0, limit: 100, sort_order: "desc" },
-      });
-      return response.data;
-    },
+    queryFn: fetchAllLectures,
   });
 
   const favouritesQuery = useQuery({
-    queryKey: favouritesQueryKey,
+    queryKey: favouritesQueryKey(userId),
     enabled: Boolean(user),
-    queryFn: async () => {
-      const response = await apiClient.get<FavouritesListResponse>("/favourites", {
-        params: { skip: 0, limit: 100 },
-      });
-      return response.data;
-    },
+    queryFn: fetchAllFavourites,
   });
 
   const addFavouriteMutation = useMutation({
@@ -81,7 +117,7 @@ export default function DashboardPage() {
       await apiClient.post(`/favourites/${lectureId}`);
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: favouritesQueryKey });
+      await queryClient.invalidateQueries({ queryKey: favouritesQueryKey(userId) });
     },
   });
 
@@ -90,7 +126,7 @@ export default function DashboardPage() {
       await apiClient.delete(`/favourites/${lectureId}`);
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: favouritesQueryKey });
+      await queryClient.invalidateQueries({ queryKey: favouritesQueryKey(userId) });
     },
   });
 
@@ -107,9 +143,12 @@ export default function DashboardPage() {
     return <Navigate to="/login" replace />;
   }
 
-  const lectures = lecturesQuery.data?.items ?? [];
+  const lectures = lecturesQuery.data ?? [];
   const statusOptions = ["all", ...Array.from(new Set<string>(lectures.map((lecture) => lecture.status)))];
-  const favouriteLectureIds = new Set((favouritesQuery.data?.items ?? []).map((item) => item.lecture_id));
+  const favouriteLectureIds =
+    favouritesQuery.isLoading || favouritesQuery.isError || !favouritesQuery.data
+      ? undefined
+      : new Set(favouritesQuery.data.map((item) => item.lecture_id));
   const normalizedSearch = searchText.trim().toLowerCase();
   const filteredLectures = lectures.filter((lecture) => {
     const matchesSearch = normalizedSearch.length === 0 || lecture.title.toLowerCase().includes(normalizedSearch);
@@ -118,8 +157,19 @@ export default function DashboardPage() {
   });
 
   async function handleToggleFavourite(lectureId: string, currentlyFavourite: boolean) {
+    if (!favouriteLectureIds) {
+      return;
+    }
+    if (togglingLectureIds.has(lectureId)) {
+      return;
+    }
+
     setErrorMessage(null);
-    setTogglingLectureId(lectureId);
+    setTogglingLectureIds((previous) => {
+      const next = new Set(previous);
+      next.add(lectureId);
+      return next;
+    });
     try {
       if (currentlyFavourite) {
         await removeFavouriteMutation.mutateAsync(lectureId);
@@ -129,7 +179,11 @@ export default function DashboardPage() {
     } catch (error) {
       setErrorMessage(extractErrorMessage(error, "Failed to update favourite state."));
     } finally {
-      setTogglingLectureId(null);
+      setTogglingLectureIds((previous) => {
+        const next = new Set(previous);
+        next.delete(lectureId);
+        return next;
+      });
     }
   }
 
@@ -141,13 +195,20 @@ export default function DashboardPage() {
       <p style={{ margin: 0 }}>Welcome, {user.username}.</p>
 
       <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+        <label htmlFor="dashboard-lecture-search">Search lectures by title</label>
         <input
+          id="dashboard-lecture-search"
           onChange={(event) => setSearchText(event.target.value)}
           placeholder="Search by lecture title"
           type="search"
           value={searchText}
         />
-        <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+        <label htmlFor="dashboard-status-filter">Filter by status</label>
+        <select
+          id="dashboard-status-filter"
+          onChange={(event) => setStatusFilter(event.target.value)}
+          value={statusFilter}
+        >
           {statusOptions.map((option) => (
             <option key={option} value={option}>
               {option === "all" ? "All statuses" : option}
@@ -184,8 +245,9 @@ export default function DashboardPage() {
           {filteredLectures.map((lecture) => (
             <LectureCard
               key={lecture.id}
-              isFavourite={favouriteLectureIds.has(lecture.id)}
-              isTogglingFavourite={togglingLectureId === lecture.id}
+              isFavourite={favouriteLectureIds?.has(lecture.id) ?? false}
+              isFavouriteKnown={Boolean(favouriteLectureIds)}
+              isTogglingFavourite={togglingLectureIds.has(lecture.id)}
               lecture={lecture}
               onToggleFavourite={handleToggleFavourite}
             />

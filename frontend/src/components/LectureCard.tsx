@@ -7,6 +7,7 @@ type LectureCardProps = {
     created_at: string;
   };
   isFavourite: boolean;
+  isFavouriteKnown: boolean;
   isTogglingFavourite: boolean;
   onToggleFavourite: (lectureId: string, currentlyFavourite: boolean) => void;
 };
@@ -22,9 +23,12 @@ function formatDate(value: string): string {
 export default function LectureCard({
   lecture,
   isFavourite,
+  isFavouriteKnown,
   isTogglingFavourite,
   onToggleFavourite,
 }: LectureCardProps) {
+  const isDisabled = isTogglingFavourite || !isFavouriteKnown;
+
   return (
     <article
       style={{
@@ -39,13 +43,13 @@ export default function LectureCard({
         <h3 style={{ margin: 0 }}>{lecture.title}</h3>
         <button
           aria-label={isFavourite ? "Remove from favourites" : "Add to favourites"}
-          disabled={isTogglingFavourite}
+          disabled={isDisabled}
           onClick={() => onToggleFavourite(lecture.id, isFavourite)}
           style={{
             border: "1px solid #d6d6d6",
             background: isFavourite ? "#fff6cc" : "#ffffff",
             borderRadius: "0.5rem",
-            cursor: isTogglingFavourite ? "not-allowed" : "pointer",
+            cursor: isDisabled ? "not-allowed" : "pointer",
             padding: "0.25rem 0.5rem",
             lineHeight: 1,
             minWidth: "2.5rem",
