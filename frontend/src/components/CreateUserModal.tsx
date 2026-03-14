@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type CreateUserPayload = {
   username: string;
@@ -23,6 +23,9 @@ export default function CreateUserModal({ isOpen, isSubmitting, onClose, onSubmi
   const [generatePassword, setGeneratePassword] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isActive, setIsActive] = useState(true);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
@@ -34,6 +37,27 @@ export default function CreateUserModal({ isOpen, isSubmitting, onClose, onSubmi
     setGeneratePassword(false);
     setIsAdmin(false);
     setIsActive(true);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      if (restoreFocusRef.current) {
+        restoreFocusRef.current.focus();
+      }
+      return;
+    }
+
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusTimer = window.setTimeout(() => {
+      nameInputRef.current?.focus();
+    }, 0);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.body.style.overflow = previousOverflow;
+    };
   }, [isOpen]);
 
   const canSubmit = useMemo(() => {
@@ -65,10 +89,57 @@ export default function CreateUserModal({ isOpen, isSubmitting, onClose, onSubmi
     });
   }
 
+  function getFocusableElements(): HTMLElement[] {
+    if (!dialogRef.current) {
+      return [];
+    }
+    const elements = dialogRef.current.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    );
+    return Array.from(elements).filter((element) => !element.hasAttribute("disabled"));
+  }
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape" && !isSubmitting) {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") {
+      return;
+    }
+    const focusableElements = getFocusableElements();
+    if (focusableElements.length === 0) {
+      event.preventDefault();
+      return;
+    }
+
+    const first = focusableElements[0];
+    const last = focusableElements[focusableElements.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+
+    if (event.shiftKey) {
+      if (!active || active === first || !focusableElements.includes(active)) {
+        event.preventDefault();
+        last.focus();
+      }
+      return;
+    }
+
+    if (!active || active === last || !focusableElements.includes(active)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <div
+      aria-labelledby="create-user-title"
       aria-modal="true"
+      onKeyDown={handleDialogKeyDown}
+      ref={dialogRef}
       role="dialog"
+      tabIndex={-1}
       style={{
         position: "fixed",
         inset: 0,
@@ -89,10 +160,18 @@ export default function CreateUserModal({ isOpen, isSubmitting, onClose, onSubmi
           gap: "0.65rem",
         }}
       >
-        <h3 style={{ margin: 0 }}>Create User</h3>
+        <h3 id="create-user-title" style={{ margin: 0 }}>
+          Create User
+        </h3>
         <label style={{ display: "grid", gap: "0.2rem" }}>
           Username
-          <input onChange={(event) => setUsername(event.target.value)} required type="text" value={username} />
+          <input
+            onChange={(event) => setUsername(event.target.value)}
+            ref={nameInputRef}
+            required
+            type="text"
+            value={username}
+          />
         </label>
         <label style={{ display: "grid", gap: "0.2rem" }}>
           Email

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../../api/client";
@@ -33,25 +33,11 @@ type AdminCreateUserResponse = {
 const PAGE_LIMIT = 100;
 const adminUsersQueryKey = (userId: string | undefined) => ["admin-users", userId] as const;
 
-async function fetchAllUsers(): Promise<AdminUser[]> {
-  const allItems: AdminUser[] = [];
-  let skip = 0;
-  let total = Number.POSITIVE_INFINITY;
-
-  while (allItems.length < total) {
-    const response = await apiClient.get<AdminUsersListResponse>("/admin/users", {
-      params: { skip, limit: PAGE_LIMIT },
-    });
-    const page = response.data;
-    total = page.total;
-    allItems.push(...page.items);
-    if (page.items.length === 0) {
-      break;
-    }
-    skip += page.items.length;
-  }
-
-  return allItems;
+async function fetchUsersPage(skip: number, limit: number): Promise<AdminUsersListResponse> {
+  const response = await apiClient.get<AdminUsersListResponse>("/admin/users", {
+    params: { skip, limit },
+  });
+  return response.data;
 }
 
 export default function UsersPage() {
@@ -63,13 +49,40 @@ export default function UsersPage() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [tokenUser, setTokenUser] = useState<AdminUser | null>(null);
   const [busyUserIds, setBusyUserIds] = useState<Set<string>>(new Set());
+  const [items, setItems] = useState<AdminUser[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
   const userId = user?.user_id;
 
   const usersQuery = useQuery({
     queryKey: adminUsersQueryKey(userId),
     enabled: Boolean(user?.is_admin),
-    queryFn: fetchAllUsers,
+    queryFn: async () => fetchUsersPage(0, PAGE_LIMIT),
   });
+
+  useEffect(() => {
+    setItems([]);
+    setTotal(0);
+    setHasHydrated(false);
+  }, [userId]);
+
+  useEffect(() => {
+    if (!usersQuery.data) {
+      return;
+    }
+    setTotal(usersQuery.data.total);
+    setItems((previous) => {
+      const firstPageItems = usersQuery.data.items;
+      if (!hasHydrated || previous.length === 0) {
+        return firstPageItems;
+      }
+      const firstPageIds = new Set(firstPageItems.map((item) => item.id));
+      const tail = previous.slice(firstPageItems.length).filter((item) => !firstPageIds.has(item.id));
+      return [...firstPageItems, ...tail].slice(0, usersQuery.data.total);
+    });
+    setHasHydrated(true);
+  }, [hasHydrated, usersQuery.data]);
 
   const createUserMutation = useMutation({
     mutationFn: async (payload: {
@@ -132,15 +145,12 @@ export default function UsersPage() {
   });
 
   const filteredUsers = useMemo(() => {
-    const items = usersQuery.data ?? [];
     const value = search.trim().toLowerCase();
     if (!value) {
       return items;
     }
-    return items.filter((item) => {
-      return item.username.toLowerCase().includes(value) || item.email.toLowerCase().includes(value);
-    });
-  }, [search, usersQuery.data]);
+    return items.filter((item) => item.username.toLowerCase().includes(value) || item.email.toLowerCase().includes(value));
+  }, [items, search]);
 
   async function runUserAction(targetUserId: string, action: () => Promise<void>) {
     if (busyUserIds.has(targetUserId)) {
@@ -168,6 +178,27 @@ export default function UsersPage() {
 
   function isBusy(userRowId: string): boolean {
     return busyUserIds.has(userRowId);
+  }
+
+  async function handleLoadMore() {
+    if (isLoadingMore || items.length >= total) {
+      return;
+    }
+    setActionError(null);
+    setIsLoadingMore(true);
+    try {
+      const page = await fetchUsersPage(items.length, PAGE_LIMIT);
+      setItems((previous) => {
+        const existingIds = new Set(previous.map((item) => item.id));
+        const nextItems = page.items.filter((item) => !existingIds.has(item.id));
+        return [...previous, ...nextItems];
+      });
+      setTotal(page.total);
+    } catch (error) {
+      setActionError(extractErrorMessage(error, "Failed to load more users."));
+    } finally {
+      setIsLoadingMore(false);
+    }
   }
 
   return (
@@ -211,66 +242,73 @@ export default function UsersPage() {
       {!usersQuery.isLoading && !usersQuery.isError && filteredUsers.length === 0 ? <p>No users found.</p> : null}
 
       {!usersQuery.isLoading && !usersQuery.isError && filteredUsers.length > 0 ? (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th align="left">Username</th>
-              <th align="left">Email</th>
-              <th align="left">Status</th>
-              <th align="left">Created</th>
-              <th align="left">Tokens</th>
-              <th align="left">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredUsers.map((row) => (
-              <tr key={row.id}>
-                <td>
-                  {row.username} {row.is_admin ? "(admin)" : ""}
-                </td>
-                <td>{row.email}</td>
-                <td>{row.is_active ? "active" : "inactive"}</td>
-                <td>{formatDate(row.created_at)}</td>
-                <td>{row.token_balance}</td>
-                <td style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                  <button
-                    disabled={isBusy(row.id)}
-                    onClick={() =>
-                      runUserAction(row.id, async () => {
-                        await updateUserMutation.mutateAsync({ userId: row.id, is_active: !row.is_active });
-                      })
-                    }
-                    type="button"
-                  >
-                    {row.is_active ? "Deactivate" : "Activate"}
-                  </button>
-                  <button
-                    disabled={isBusy(row.id)}
-                    onClick={() =>
-                      runUserAction(row.id, async () => {
-                        await deactivateUserMutation.mutateAsync(row.id);
-                      })
-                    }
-                    type="button"
-                  >
-                    Delete
-                  </button>
-                  <button
-                    disabled={isBusy(row.id)}
-                    onClick={() => {
-                      setActionError(null);
-                      setActionSuccess(null);
-                      setTokenUser(row);
-                    }}
-                    type="button"
-                  >
-                    Add tokens
-                  </button>
-                </td>
+        <>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th align="left">Username</th>
+                <th align="left">Email</th>
+                <th align="left">Status</th>
+                <th align="left">Created</th>
+                <th align="left">Tokens</th>
+                <th align="left">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filteredUsers.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    {row.username} {row.is_admin ? "(admin)" : ""}
+                  </td>
+                  <td>{row.email}</td>
+                  <td>{row.is_active ? "active" : "inactive"}</td>
+                  <td>{formatDate(row.created_at)}</td>
+                  <td>{row.token_balance}</td>
+                  <td style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                    <button
+                      disabled={isBusy(row.id) || row.id === userId}
+                      onClick={() =>
+                        runUserAction(row.id, async () => {
+                          await updateUserMutation.mutateAsync({ userId: row.id, is_active: !row.is_active });
+                        })
+                      }
+                      type="button"
+                    >
+                      {row.is_active ? "Deactivate" : "Activate"}
+                    </button>
+                    <button
+                      disabled={isBusy(row.id) || row.id === userId}
+                      onClick={() =>
+                        runUserAction(row.id, async () => {
+                          await deactivateUserMutation.mutateAsync(row.id);
+                        })
+                      }
+                      type="button"
+                    >
+                      Delete
+                    </button>
+                    <button
+                      disabled={isBusy(row.id)}
+                      onClick={() => {
+                        setActionError(null);
+                        setActionSuccess(null);
+                        setTokenUser(row);
+                      }}
+                      type="button"
+                    >
+                      Add tokens
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {items.length < total ? (
+            <button disabled={isLoadingMore} onClick={handleLoadMore} type="button">
+              {isLoadingMore ? "Loading..." : "Load more"}
+            </button>
+          ) : null}
+        </>
       ) : null}
 
       <CreateUserModal
@@ -284,7 +322,11 @@ export default function UsersPage() {
         onSubmit={async (payload) => {
           setActionError(null);
           setActionSuccess(null);
-          await createUserMutation.mutateAsync(payload);
+          try {
+            await createUserMutation.mutateAsync(payload);
+          } catch (error) {
+            setActionError(extractErrorMessage(error, "Failed to create user."));
+          }
         }}
       />
 
@@ -302,7 +344,11 @@ export default function UsersPage() {
           }
           setActionError(null);
           setActionSuccess(null);
-          await addTokensMutation.mutateAsync({ userId: tokenUser.id, amount, reason });
+          try {
+            await addTokensMutation.mutateAsync({ userId: tokenUser.id, amount, reason });
+          } catch (error) {
+            setActionError(extractErrorMessage(error, "Failed to add tokens."));
+          }
         }}
         username={tokenUser?.username}
       />
