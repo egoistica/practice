@@ -1,6 +1,9 @@
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
+import DashboardPage from "./pages/Dashboard";
+import LoginPage from "./pages/Login";
+import RegisterPage from "./pages/Register";
 
 function HomePage() {
   return (
@@ -22,7 +25,7 @@ function ProfilePage() {
     );
   }
   if (!user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/login" replace />;
   }
   return (
     <section>
@@ -34,20 +37,40 @@ function ProfilePage() {
   );
 }
 
-export default function App() {
+function DefaultRoute() {
   const { isAuthenticated, isLoading } = useAuth();
+  if (isLoading) {
+    return <p>Loading...</p>;
+  }
+  return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
+}
+
+export default function App() {
+  const { isAuthenticated, isLoading, logout } = useAuth();
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", margin: "2rem" }}>
       <h1>Lecture Notes Frontend</h1>
       <p>Status: {isLoading ? "loading..." : isAuthenticated ? "authenticated" : "guest"}</p>
       <nav style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
-        <Link to="/">Home</Link>
+        <Link to="/home">Home</Link>
+        <Link to="/dashboard">Dashboard</Link>
         <Link to="/profile">Profile</Link>
+        {!isAuthenticated ? <Link to="/login">Login</Link> : null}
+        {!isAuthenticated ? <Link to="/register">Register</Link> : null}
+        {isAuthenticated ? (
+          <button onClick={logout} type="button">
+            Logout
+          </button>
+        ) : null}
       </nav>
 
       <Routes>
-        <Route path="/" element={<HomePage />} />
+        <Route path="/" element={<DefaultRoute />} />
+        <Route path="/home" element={<HomePage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/profile" element={<ProfilePage />} />
       </Routes>
     </main>
