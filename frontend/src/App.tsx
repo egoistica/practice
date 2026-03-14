@@ -1,11 +1,13 @@
+import { Suspense, lazy } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
-import LectureDetailsPage from "./pages/LectureDetails";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
 import UploadPage from "./pages/Upload";
+
+const LecturePage = lazy(() => import("./pages/Lecture"));
 
 function HomePage() {
   return (
@@ -75,7 +77,14 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/upload" element={<UploadPage />} />
-        <Route path="/lecture/:lectureId" element={<LectureDetailsPage />} />
+        <Route
+          path="/lecture/:lectureId"
+          element={
+            <Suspense fallback={<p>Loading lecture page...</p>}>
+              <LecturePage />
+            </Suspense>
+          }
+        />
       </Routes>
     </main>
   );
