@@ -28,10 +28,12 @@ type GraphData = {
 
 type EntityGraphProps = {
   graph: GraphData;
+  highlightedEntityLabel?: string | null;
 };
 
-export default function EntityGraph({ graph }: EntityGraphProps) {
+export default function EntityGraph({ graph, highlightedEntityLabel = null }: EntityGraphProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const networkRef = useRef<Network | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const selectedNode = useMemo(() => {
@@ -102,11 +104,31 @@ export default function EntityGraph({ graph }: EntityGraphProps) {
       }
       setSelectedNodeId(String(clickedNode));
     });
+    networkRef.current = network;
 
     return () => {
+      networkRef.current = null;
       network.destroy();
     };
   }, [graph.edges, graph.nodes]);
+
+  useEffect(() => {
+    if (!highlightedEntityLabel || !networkRef.current) {
+      return;
+    }
+    const target = graph.nodes.find(
+      (node) => node.label.trim().toLowerCase() === highlightedEntityLabel.trim().toLowerCase(),
+    );
+    if (!target) {
+      return;
+    }
+    setSelectedNodeId(target.id);
+    networkRef.current.selectNodes([target.id]);
+    networkRef.current.focus(target.id, {
+      scale: 1.1,
+      animation: { duration: 350, easingFunction: "easeInOutQuad" },
+    });
+  }, [graph.nodes, highlightedEntityLabel]);
 
   return (
     <section style={{ display: "grid", gap: "0.75rem", minWidth: 0 }}>
