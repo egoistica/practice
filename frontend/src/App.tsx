@@ -37,6 +37,22 @@ function ProfilePage() {
   );
 }
 
+function UploadPage() {
+  const { isAuthenticated, isLoading } = useAuth();
+  if (isLoading) {
+    return <p>Loading...</p>;
+  }
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+  return (
+    <section>
+      <h2>Upload Lecture</h2>
+      <p>Upload form will be implemented in the next task.</p>
+    </section>
+  );
+}
+
 function DefaultRoute() {
   const { isAuthenticated, isLoading } = useAuth();
   if (isLoading) {
@@ -72,6 +88,7 @@ export default function App() {
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/profile" element={<ProfilePage />} />
+        <Route path="/upload" element={<UploadPage />} />
       </Routes>
     </main>
   );
