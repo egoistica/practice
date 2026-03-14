@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "yandex"
     LLM_MODEL: str = "yandexgpt-lite/latest"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_FALLBACK_MODELS: str = ""
     MEDIA_ROOT: str = "/media"
 
     @property
@@ -195,6 +196,7 @@ def get_settings() -> Settings:
             LLM_PROVIDER=os.getenv("LLM_PROVIDER", "yandex"),
             LLM_MODEL=os.getenv("LLM_MODEL", "yandexgpt-lite/latest"),
             OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            OLLAMA_FALLBACK_MODELS=os.getenv("OLLAMA_FALLBACK_MODELS", ""),
             MEDIA_ROOT=os.getenv("MEDIA_ROOT", "/media"),
         )
 
