@@ -2,7 +2,7 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
-import LectureDetailsPage from "./pages/LectureDetails";
+import LecturePage from "./pages/Lecture";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
 import UploadPage from "./pages/Upload";
@@ -75,7 +75,7 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/upload" element={<UploadPage />} />
-        <Route path="/lecture/:lectureId" element={<LectureDetailsPage />} />
+        <Route path="/lecture/:lectureId" element={<LecturePage />} />
       </Routes>
     </main>
   );
