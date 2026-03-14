@@ -1,5 +1,5 @@
 import { Suspense, lazy } from "react";
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { Link, Navigate, Outlet, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
@@ -55,7 +55,7 @@ function DefaultRoute() {
   return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
 }
 
-function AdminRoute({ children }: { children: JSX.Element }) {
+function AdminRoute() {
   const { user, isLoading } = useAuth();
   if (isLoading) {
     return <p>Loading...</p>;
@@ -66,7 +66,7 @@ function AdminRoute({ children }: { children: JSX.Element }) {
   if (!user.is_admin) {
     return <Navigate to="/dashboard" replace />;
   }
-  return children;
+  return <Outlet />;
 }
 
 export default function App() {
@@ -101,38 +101,12 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/favourites" element={<FavouritesPage />} />
         <Route path="/history" element={<HistoryPage />} />
-        <Route
-          path="/admin"
-          element={
-            <AdminRoute>
-              <AdminDashboardPage />
-            </AdminRoute>
-          }
-        />
-        <Route
-          path="/admin/users"
-          element={
-            <AdminRoute>
-              <AdminUsersPage />
-            </AdminRoute>
-          }
-        />
-        <Route
-          path="/admin/statistics"
-          element={
-            <AdminRoute>
-              <AdminStatisticsPage />
-            </AdminRoute>
-          }
-        />
-        <Route
-          path="/admin/database-stats"
-          element={
-            <AdminRoute>
-              <AdminDatabaseStatsPage />
-            </AdminRoute>
-          }
-        />
+        <Route element={<AdminRoute />} path="/admin">
+          <Route element={<AdminDashboardPage />} index />
+          <Route element={<AdminUsersPage />} path="users" />
+          <Route element={<AdminStatisticsPage />} path="statistics" />
+          <Route element={<AdminDatabaseStatsPage />} path="database-stats" />
+        </Route>
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route

@@ -91,8 +91,8 @@ export default function AdminDashboardPage() {
               <p style={{ marginBottom: 0 }}>No entities found yet.</p>
             ) : (
               <ol style={{ margin: 0, paddingLeft: "1.25rem", display: "grid", gap: "0.25rem" }}>
-                {statsQuery.data.top_entities.map((entity) => (
-                  <li key={entity.label}>
+                {statsQuery.data.top_entities.map((entity, index) => (
+                  <li key={`${entity.label}-${index}`}>
                     {entity.label} ({entity.mentions})
                   </li>
                 ))}

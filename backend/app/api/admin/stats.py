@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from pathlib import Path
 
@@ -45,9 +46,9 @@ async def get_admin_overview_stats(
     users_count = int((await db.execute(select(func.count()).select_from(User))).scalar_one())
     lectures_count = int((await db.execute(select(func.count()).select_from(Lecture))).scalar_one())
 
-    nodes_rows = (await db.execute(select(EntityGraph.nodes))).scalars().all()
     entities_counter: Counter[str] = Counter()
-    for nodes in nodes_rows:
+    nodes_stream = await db.stream(select(EntityGraph.nodes))
+    async for nodes in nodes_stream.scalars():
         if not isinstance(nodes, list):
             continue
         for node in nodes:
@@ -64,7 +65,7 @@ async def get_admin_overview_stats(
     ]
 
     media_path = Path(settings.MEDIA_ROOT)
-    storage_size = _storage_size_bytes(media_path)
+    storage_size = await asyncio.to_thread(_storage_size_bytes, media_path)
 
     return AdminOverviewStatsResponse(
         users_count=users_count,
