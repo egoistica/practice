@@ -271,7 +271,12 @@ export default function LecturePage() {
                   </p>
                 ) : null}
                 {graphQuery.data ? (
-                  <EntityGraph graph={graphQuery.data} highlightedEntityLabel={highlightedEntityLabel} />
+                  <EntityGraph
+                    graph={graphQuery.data}
+                    highlightedEntityLabel={highlightedEntityLabel}
+                    lectureId={lectureId}
+                    onTimecodeClick={setSelectedTimecode}
+                  />
                 ) : null}
               </div>
             </div>
