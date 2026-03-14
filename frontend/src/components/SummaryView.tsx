@@ -41,7 +41,7 @@ function blockTypeLabel(type: string): string {
   if (normalized === "conclusion") {
     return "Conclusion";
   }
-  return "Thought";
+  return type.trim() || type;
 }
 
 export default function SummaryView({ summary }: SummaryViewProps) {

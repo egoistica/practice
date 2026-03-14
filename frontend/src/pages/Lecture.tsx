@@ -70,8 +70,41 @@ function normalizeStatus(raw: string | undefined): string {
   return (raw || "pending").trim().toLowerCase();
 }
 
+function normalizeProgress(raw: number | undefined): number {
+  const value = Number(raw ?? 0);
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function isTerminalStatus(status: string): boolean {
   return status === "done" || status === "error";
+}
+
+function statusRank(status: string): number {
+  if (status === "pending") {
+    return 0;
+  }
+  if (status === "processing") {
+    return 1;
+  }
+  if (status === "done" || status === "error") {
+    return 2;
+  }
+  return 1;
+}
+
+function mergeMonotonicStatus(previous: string, incoming: string): string {
+  const prev = normalizeStatus(previous);
+  const next = normalizeStatus(incoming);
+  if (isTerminalStatus(prev)) {
+    return prev;
+  }
+  if (statusRank(next) < statusRank(prev)) {
+    return prev;
+  }
+  return next;
 }
 
 export default function LecturePage() {
@@ -97,32 +130,32 @@ export default function LecturePage() {
   });
 
   useEffect(() => {
+    setLiveProgress(0);
+    setLiveStatus("pending");
+  }, [lectureId]);
+
+  useEffect(() => {
     if (!lectureQuery.data) {
       return;
     }
-    setLiveProgress(lectureQuery.data.processing_progress);
-    setLiveStatus(normalizeStatus(lectureQuery.data.status));
+    setLiveProgress((previous) => Math.max(previous, normalizeProgress(lectureQuery.data.processing_progress)));
+    setLiveStatus((previous) => mergeMonotonicStatus(previous, lectureQuery.data.status));
   }, [lectureQuery.data]);
 
-  const effectiveStatus = useMemo(() => {
-    const remoteStatus = normalizeStatus(lectureQuery.data?.status);
-    if (isTerminalStatus(liveStatus)) {
-      return liveStatus;
-    }
-    return remoteStatus || liveStatus;
-  }, [lectureQuery.data?.status, liveStatus]);
+  const effectiveStatus = useMemo(() => liveStatus, [liveStatus]);
 
   const effectiveProgress = useMemo(() => {
-    const remoteProgress = lectureQuery.data?.processing_progress ?? 0;
     if (effectiveStatus === "done") {
       return 100;
     }
-    return Math.max(remoteProgress, liveProgress);
-  }, [effectiveStatus, lectureQuery.data?.processing_progress, liveProgress]);
+    return liveProgress;
+  }, [effectiveStatus, liveProgress]);
+
+  const canRenderLectureContent = !lectureQuery.isError && Boolean(lectureQuery.data);
 
   const summaryQuery = useQuery({
     queryKey: ["lecture-summary", lectureId],
-    enabled: Boolean(isAuthenticated && lectureId && effectiveStatus === "done"),
+    enabled: Boolean(isAuthenticated && lectureId && canRenderLectureContent && effectiveStatus === "done"),
     queryFn: async () => {
       const response = await apiClient.get<SummaryResponse>(`/lectures/${lectureId}/summary`);
       return response.data;
@@ -131,7 +164,7 @@ export default function LecturePage() {
 
   const graphQuery = useQuery({
     queryKey: ["lecture-graph", lectureId],
-    enabled: Boolean(isAuthenticated && lectureId && effectiveStatus === "done"),
+    enabled: Boolean(isAuthenticated && lectureId && canRenderLectureContent && effectiveStatus === "done"),
     queryFn: async () => {
       const response = await apiClient.get<GraphResponse>(`/lectures/${lectureId}/graph`);
       return response.data;
@@ -139,8 +172,8 @@ export default function LecturePage() {
   });
 
   const handleProgress = useCallback((update: { progress: number; status: string }) => {
-    setLiveProgress(update.progress);
-    setLiveStatus(normalizeStatus(update.status));
+    setLiveProgress((previous) => Math.max(previous, normalizeProgress(update.progress)));
+    setLiveStatus((previous) => mergeMonotonicStatus(previous, update.status));
   }, []);
 
   if (isLoading) {
@@ -171,27 +204,31 @@ export default function LecturePage() {
         </p>
       ) : null}
 
-      <ProgressBar
-        initialProgress={effectiveProgress}
-        initialStatus={effectiveStatus}
-        lectureId={lectureId}
-        onProgress={handleProgress}
-        token={token}
-      />
+      {!canRenderLectureContent && lectureQuery.isLoading ? <p>Loading lecture details...</p> : null}
 
-      {effectiveStatus !== "done" && effectiveStatus !== "error" ? (
-        <p style={{ margin: 0 }}>
-          Lecture is being processed. Summary and graph will appear after completion.
-        </p>
-      ) : null}
+      {canRenderLectureContent ? (
+        <>
+          <ProgressBar
+            initialProgress={effectiveProgress}
+            initialStatus={effectiveStatus}
+            lectureId={lectureId}
+            onProgress={handleProgress}
+            token={token}
+          />
 
-      {effectiveStatus === "error" ? (
-        <p style={{ color: "#b00020", margin: 0 }} role="alert">
-          Lecture processing failed. Please retry with another source file or URL.
-        </p>
-      ) : null}
+          {effectiveStatus !== "done" && effectiveStatus !== "error" ? (
+            <p style={{ margin: 0 }}>
+              Lecture is being processed. Summary and graph will appear after completion.
+            </p>
+          ) : null}
 
-      {effectiveStatus === "done" ? (
+          {effectiveStatus === "error" ? (
+            <p style={{ color: "#b00020", margin: 0 }} role="alert">
+              Lecture processing failed. Please retry with another source file or URL.
+            </p>
+          ) : null}
+
+          {effectiveStatus === "done" ? (
         <div
           style={{
             display: "grid",
@@ -219,6 +256,8 @@ export default function LecturePage() {
             {graphQuery.data ? <EntityGraph graph={graphQuery.data} /> : null}
           </div>
         </div>
+          ) : null}
+        </>
       ) : null}
     </section>
   );

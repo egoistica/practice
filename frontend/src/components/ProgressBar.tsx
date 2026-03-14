@@ -14,6 +14,7 @@ type ProgressBarProps = {
 };
 
 const TERMINAL_STATUSES = new Set(["done", "error"]);
+const TRANSIENT_CLOSE_CODES = new Set([1001, 1006]);
 
 function normalizeProgress(value: number): number {
   if (!Number.isFinite(value)) {
@@ -80,6 +81,10 @@ export default function ProgressBar({
       if (isStopped || TERMINAL_STATUSES.has(stateRef.current.status)) {
         return;
       }
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
 
       socket = new WebSocket(buildWebSocketUrl(lectureId, token));
 
@@ -109,10 +114,24 @@ export default function ProgressBar({
         };
         stateRef.current = next;
         setState(next);
+        if (TERMINAL_STATUSES.has(next.status)) {
+          socket?.close(1000, "terminal-status");
+        }
       };
 
-      socket.onclose = () => {
-        if (isStopped || TERMINAL_STATUSES.has(stateRef.current.status)) {
+      socket.onclose = (event) => {
+        if (reconnectTimer !== null) {
+          window.clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+
+        const shouldReconnect =
+          !isStopped &&
+          !TERMINAL_STATUSES.has(stateRef.current.status) &&
+          !(event.code >= 4000 && event.code <= 4999) &&
+          TRANSIENT_CLOSE_CODES.has(event.code);
+
+        if (!shouldReconnect) {
           return;
         }
         reconnectTimer = window.setTimeout(connect, 2000);
