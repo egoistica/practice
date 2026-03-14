@@ -3,6 +3,10 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
+import AdminDashboardPage from "./pages/admin/AdminDashboard";
+import AdminDatabaseStatsPage from "./pages/admin/AdminDatabaseStats";
+import AdminStatisticsPage from "./pages/admin/AdminStatistics";
+import AdminUsersPage from "./pages/admin/AdminUsers";
 import FavouritesPage from "./pages/Favourites";
 import HistoryPage from "./pages/History";
 import LoginPage from "./pages/Login";
@@ -51,8 +55,23 @@ function DefaultRoute() {
   return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
 }
 
+function AdminRoute({ children }: { children: JSX.Element }) {
+  const { user, isLoading } = useAuth();
+  if (isLoading) {
+    return <p>Loading...</p>;
+  }
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  if (!user.is_admin) {
+    return <Navigate to="/dashboard" replace />;
+  }
+  return children;
+}
+
 export default function App() {
-  const { isAuthenticated, isLoading, logout } = useAuth();
+  const { user, isAuthenticated, isLoading, logout } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", margin: "2rem" }}>
@@ -63,6 +82,7 @@ export default function App() {
         <Link to="/dashboard">Dashboard</Link>
         {isAuthenticated ? <Link to="/favourites">Favourites</Link> : null}
         {isAuthenticated ? <Link to="/history">History</Link> : null}
+        {isAdmin ? <Link to="/admin">Admin</Link> : null}
         <Link to="/profile">Profile</Link>
         {!isAuthenticated ? <Link to="/login">Login</Link> : null}
         {!isAuthenticated ? <Link to="/register">Register</Link> : null}
@@ -81,6 +101,38 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/favourites" element={<FavouritesPage />} />
         <Route path="/history" element={<HistoryPage />} />
+        <Route
+          path="/admin"
+          element={
+            <AdminRoute>
+              <AdminDashboardPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsersPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/statistics"
+          element={
+            <AdminRoute>
+              <AdminStatisticsPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/database-stats"
+          element={
+            <AdminRoute>
+              <AdminDatabaseStatsPage />
+            </AdminRoute>
+          }
+        />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route
