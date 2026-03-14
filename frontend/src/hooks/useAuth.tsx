@@ -95,7 +95,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             applyTokens(null, null);
             setUser(null);
           }
+          throw error;
         }
+        throw error;
       } finally {
         setIsLoading(false);
       }
@@ -120,7 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     setAccessToken(token);
-    void refreshUser();
+    void refreshUser().catch(() => undefined);
   }, [applyTokens, refreshUser, token]);
 
   const login = useCallback(
