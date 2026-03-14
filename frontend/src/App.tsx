@@ -6,7 +6,7 @@ import DashboardPage from "./pages/Dashboard";
 import AdminDashboardPage from "./pages/admin/AdminDashboard";
 import AdminDatabaseStatsPage from "./pages/admin/AdminDatabaseStats";
 import AdminStatisticsPage from "./pages/admin/AdminStatistics";
-import AdminUsersPage from "./pages/admin/AdminUsers";
+import UsersPage from "./pages/admin/UsersPage";
 import FavouritesPage from "./pages/Favourites";
 import HistoryPage from "./pages/History";
 import LoginPage from "./pages/Login";
@@ -103,7 +103,7 @@ export default function App() {
         <Route path="/history" element={<HistoryPage />} />
         <Route element={<AdminRoute />} path="/admin">
           <Route element={<AdminDashboardPage />} index />
-          <Route element={<AdminUsersPage />} path="users" />
+          <Route element={<UsersPage />} path="users" />
           <Route element={<AdminStatisticsPage />} path="statistics" />
           <Route element={<AdminDatabaseStatsPage />} path="database-stats" />
         </Route>
