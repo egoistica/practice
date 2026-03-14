@@ -1,9 +1,17 @@
 import axios from "axios";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { AUTH_TOKEN_STORAGE_KEY, apiClient, setAccessToken } from "../api/client";
 
-const AUTH_REFRESH_TOKEN_STORAGE_KEY = "auth_refresh_token";
+export const AUTH_REFRESH_TOKEN_STORAGE_KEY = "auth_refresh_token";
 
 type TokenResponse = {
   access_token: string;
@@ -43,7 +51,9 @@ export type UseAuthResult = {
   refreshUser: () => Promise<void>;
 };
 
-export function useAuth(): UseAuthResult {
+const AuthContext = createContext<UseAuthResult | undefined>(undefined);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(AUTH_TOKEN_STORAGE_KEY));
   const [refreshToken, setRefreshToken] = useState<string | null>(() =>
     localStorage.getItem(AUTH_REFRESH_TOKEN_STORAGE_KEY),
@@ -71,28 +81,36 @@ export function useAuth(): UseAuthResult {
     setRefreshToken(null);
   }, []);
 
+  const fetchUserWithToken = useCallback(
+    async (tokenValue: string) => {
+      setIsLoading(true);
+      setAccessToken(tokenValue);
+      try {
+        const response = await apiClient.get<AuthUser>("/auth/me");
+        setUser(response.data);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          const status = error.response?.status;
+          if (status === 401 || status === 403) {
+            applyTokens(null, null);
+            setUser(null);
+          }
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [applyTokens],
+  );
+
   const refreshUser = useCallback(async () => {
     if (!token) {
       setUser(null);
       setIsLoading(false);
       return;
     }
-    setIsLoading(true);
-    try {
-      const response = await apiClient.get<AuthUser>("/auth/me");
-      setUser(response.data);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const status = error.response?.status;
-        if (status === 401 || status === 403) {
-          applyTokens(null, null);
-          setUser(null);
-        }
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, [applyTokens, token]);
+    await fetchUserWithToken(token);
+  }, [fetchUserWithToken, token]);
 
   useEffect(() => {
     if (!token) {
@@ -109,20 +127,20 @@ export function useAuth(): UseAuthResult {
     async (payload: LoginPayload) => {
       const response = await apiClient.post<TokenResponse>("/auth/login", payload);
       applyTokens(response.data.access_token, response.data.refresh_token);
-      await refreshUser();
+      await fetchUserWithToken(response.data.access_token);
       return response.data;
     },
-    [applyTokens, refreshUser],
+    [applyTokens, fetchUserWithToken],
   );
 
   const register = useCallback(
     async (payload: RegisterPayload) => {
       const response = await apiClient.post<TokenResponse>("/auth/register", payload);
       applyTokens(response.data.access_token, response.data.refresh_token);
-      await refreshUser();
+      await fetchUserWithToken(response.data.access_token);
       return response.data;
     },
-    [applyTokens, refreshUser],
+    [applyTokens, fetchUserWithToken],
   );
 
   const logout = useCallback(() => {
@@ -133,15 +151,28 @@ export function useAuth(): UseAuthResult {
 
   const isAuthenticated = useMemo(() => Boolean(token), [token]);
 
-  return {
-    user,
-    token,
-    refreshToken,
-    isAuthenticated,
-    isLoading,
-    login,
-    register,
-    logout,
-    refreshUser,
-  };
+  const value = useMemo<UseAuthResult>(
+    () => ({
+      user,
+      token,
+      refreshToken,
+      isAuthenticated,
+      isLoading,
+      login,
+      register,
+      logout,
+      refreshUser,
+    }),
+    [isAuthenticated, isLoading, login, logout, refreshToken, refreshUser, register, token, user],
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth(): UseAuthResult {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within AuthProvider");
+  }
+  return context;
 }
