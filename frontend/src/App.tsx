@@ -3,6 +3,8 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
+import FavouritesPage from "./pages/Favourites";
+import HistoryPage from "./pages/History";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
 import UploadPage from "./pages/Upload";
@@ -59,6 +61,8 @@ export default function App() {
       <nav style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
         <Link to="/home">Home</Link>
         <Link to="/dashboard">Dashboard</Link>
+        {isAuthenticated ? <Link to="/favourites">Favourites</Link> : null}
+        {isAuthenticated ? <Link to="/history">History</Link> : null}
         <Link to="/profile">Profile</Link>
         {!isAuthenticated ? <Link to="/login">Login</Link> : null}
         {!isAuthenticated ? <Link to="/register">Register</Link> : null}
@@ -75,6 +79,8 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/favourites" element={<FavouritesPage />} />
+        <Route path="/history" element={<HistoryPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route
