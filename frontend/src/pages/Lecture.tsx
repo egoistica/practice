@@ -112,6 +112,8 @@ export default function LecturePage() {
   const { isAuthenticated, isLoading, token } = useAuth();
   const [liveProgress, setLiveProgress] = useState(0);
   const [liveStatus, setLiveStatus] = useState("pending");
+  const [highlightedEntityLabel, setHighlightedEntityLabel] = useState<string | null>(null);
+  const [selectedTimecode, setSelectedTimecode] = useState<number | null>(null);
 
   const lectureQuery = useQuery({
     queryKey: ["lecture", lectureId],
@@ -132,6 +134,8 @@ export default function LecturePage() {
   useEffect(() => {
     setLiveProgress(0);
     setLiveStatus("pending");
+    setHighlightedEntityLabel(null);
+    setSelectedTimecode(null);
   }, [lectureId]);
 
   useEffect(() => {
@@ -229,33 +233,48 @@ export default function LecturePage() {
           ) : null}
 
           {effectiveStatus === "done" ? (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-            gap: "1rem",
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
-            {summaryQuery.isLoading ? <p>Loading summary...</p> : null}
-            {summaryQuery.isError ? (
-              <p style={{ color: "#b00020", margin: 0 }} role="alert">
-                {extractErrorMessage(summaryQuery.error, "Failed to load summary.")}
-              </p>
-            ) : null}
-            {summaryQuery.data ? <SummaryView summary={summaryQuery.data} /> : null}
-          </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+                gap: "1rem",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                {summaryQuery.isLoading ? <p>Loading summary...</p> : null}
+                {summaryQuery.isError ? (
+                  <p style={{ color: "#b00020", margin: 0 }} role="alert">
+                    {extractErrorMessage(summaryQuery.error, "Failed to load summary.")}
+                  </p>
+                ) : null}
+                {summaryQuery.data ? (
+                  <SummaryView
+                    entityLabels={(graphQuery.data?.nodes ?? []).map((node) => node.label)}
+                    lectureId={lectureId}
+                    onEntityClick={setHighlightedEntityLabel}
+                    onTimecodeClick={setSelectedTimecode}
+                    summary={summaryQuery.data}
+                  />
+                ) : null}
+              </div>
 
-          <div style={{ minWidth: 0 }}>
-            {graphQuery.isLoading ? <p>Loading graph...</p> : null}
-            {graphQuery.isError ? (
-              <p style={{ color: "#b00020", margin: 0 }} role="alert">
-                {extractErrorMessage(graphQuery.error, "Failed to load graph.")}
-              </p>
-            ) : null}
-            {graphQuery.data ? <EntityGraph graph={graphQuery.data} /> : null}
-          </div>
-        </div>
+              <div style={{ minWidth: 0 }}>
+                {selectedTimecode !== null ? (
+                  <p style={{ marginTop: 0 }}>
+                    Selected timecode: <strong>{selectedTimecode}s</strong>
+                  </p>
+                ) : null}
+                {graphQuery.isLoading ? <p>Loading graph...</p> : null}
+                {graphQuery.isError ? (
+                  <p style={{ color: "#b00020", margin: 0 }} role="alert">
+                    {extractErrorMessage(graphQuery.error, "Failed to load graph.")}
+                  </p>
+                ) : null}
+                {graphQuery.data ? (
+                  <EntityGraph graph={graphQuery.data} highlightedEntityLabel={highlightedEntityLabel} />
+                ) : null}
+              </div>
+            </div>
           ) : null}
         </>
       ) : null}
