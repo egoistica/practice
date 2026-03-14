@@ -1,10 +1,10 @@
-import axios from "axios";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
+import { extractErrorMessage, formatDate } from "../utils/presentation";
 
 type HistoryLecture = {
   lecture_id: string;
@@ -24,68 +24,53 @@ type HistoryResponse = {
 
 const PAGE_LIMIT = 100;
 
-function extractErrorMessage(error: unknown, fallback: string): string {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string" && detail.trim()) {
-      return detail;
-    }
-  }
-  return fallback;
-}
-
-async function fetchAllHistory(sortOrder: "asc" | "desc"): Promise<HistoryLecture[]> {
-  const allItems: HistoryLecture[] = [];
-  let skip = 0;
-  let total = Number.POSITIVE_INFINITY;
-
-  while (allItems.length < total) {
-    const response = await apiClient.get<HistoryResponse>("/history", {
-      params: { skip, limit: PAGE_LIMIT, sort_order: sortOrder },
-    });
-    const page = response.data;
-    total = page.total;
-    allItems.push(...page.items);
-
-    if (page.items.length === 0) {
-      break;
-    }
-    skip += page.items.length;
-  }
-
-  return allItems;
-}
-
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
+async function fetchAllHistory(skip: number, limit: number, sortOrder: "asc" | "desc"): Promise<HistoryResponse> {
+  const response = await apiClient.get<HistoryResponse>("/history", {
+    params: { skip, limit, sort_order: sortOrder },
+  });
+  return response.data;
 }
 
 export default function HistoryPage() {
   const { user, isLoading } = useAuth();
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [items, setItems] = useState<HistoryLecture[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const userId = user?.user_id;
 
   const historyQuery = useQuery({
     queryKey: ["history-page", userId, sortOrder],
     enabled: Boolean(user),
-    queryFn: async () => fetchAllHistory(sortOrder),
+    queryFn: async () => fetchAllHistory(0, PAGE_LIMIT, sortOrder),
   });
 
-  const sortedItems = useMemo(() => {
+  useEffect(() => {
     if (!historyQuery.data) {
-      return [];
+      return;
     }
-    if (sortOrder === "desc") {
-      return historyQuery.data;
+    setItems(historyQuery.data.items);
+    setTotal(historyQuery.data.total);
+    setLoadMoreError(null);
+  }, [historyQuery.data]);
+
+  async function handleLoadMore() {
+    if (isLoadingMore || items.length >= total) {
+      return;
     }
-    return [...historyQuery.data].sort(
-      (a, b) => new Date(a.visited_at).getTime() - new Date(b.visited_at).getTime(),
-    );
-  }, [historyQuery.data, sortOrder]);
+    setLoadMoreError(null);
+    setIsLoadingMore(true);
+    try {
+      const page = await fetchAllHistory(items.length, PAGE_LIMIT, sortOrder);
+      setItems((previous) => [...previous, ...page.items]);
+      setTotal(page.total);
+    } catch (error) {
+      setLoadMoreError(extractErrorMessage(error, "Failed to load more history."));
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }
 
   if (isLoading) {
     return <p>Loading...</p>;
@@ -117,36 +102,48 @@ export default function HistoryPage() {
           {extractErrorMessage(historyQuery.error, "Failed to load history.")}
         </p>
       ) : null}
+      {loadMoreError ? (
+        <p style={{ color: "#b00020", margin: 0 }} role="alert">
+          {loadMoreError}
+        </p>
+      ) : null}
 
-      {!historyQuery.isLoading && !historyQuery.isError && sortedItems.length === 0 ? (
+      {!historyQuery.isLoading && !historyQuery.isError && items.length === 0 ? (
         <p>History is empty.</p>
       ) : null}
 
-      {!historyQuery.isLoading && !historyQuery.isError && sortedItems.length > 0 ? (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th align="left">Title</th>
-              <th align="left">Status</th>
-              <th align="left">Progress</th>
-              <th align="left">Visited at</th>
-              <th align="left">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedItems.map((item) => (
-              <tr key={`${item.lecture_id}-${item.visited_at}`}>
-                <td>{item.title}</td>
-                <td>{item.status}</td>
-                <td>{item.processing_progress}%</td>
-                <td>{formatDate(item.visited_at)}</td>
-                <td>
-                  <Link to={`/lecture/${item.lecture_id}`}>Open</Link>
-                </td>
+      {!historyQuery.isLoading && !historyQuery.isError && items.length > 0 ? (
+        <>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th align="left">Title</th>
+                <th align="left">Status</th>
+                <th align="left">Progress</th>
+                <th align="left">Visited at</th>
+                <th align="left">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={`${item.lecture_id}-${item.visited_at}`}>
+                  <td>{item.title}</td>
+                  <td>{item.status}</td>
+                  <td>{item.processing_progress}%</td>
+                  <td>{formatDate(item.visited_at)}</td>
+                  <td>
+                    <Link to={`/lecture/${item.lecture_id}`}>Open</Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {items.length < total ? (
+            <button disabled={isLoadingMore} onClick={handleLoadMore} type="button">
+              {isLoadingMore ? "Loading..." : "Load more"}
+            </button>
+          ) : null}
+        </>
       ) : null}
     </section>
   );

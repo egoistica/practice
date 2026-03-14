@@ -1,10 +1,10 @@
-import axios from "axios";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
+import { extractErrorMessage, formatDate } from "../utils/presentation";
 
 type FavouriteLecture = {
   lecture_id: string;
@@ -24,44 +24,11 @@ type FavouritesResponse = {
 
 const PAGE_LIMIT = 100;
 
-function extractErrorMessage(error: unknown, fallback: string): string {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string" && detail.trim()) {
-      return detail;
-    }
-  }
-  return fallback;
-}
-
-async function fetchAllFavourites(): Promise<FavouriteLecture[]> {
-  const allItems: FavouriteLecture[] = [];
-  let skip = 0;
-  let total = Number.POSITIVE_INFINITY;
-
-  while (allItems.length < total) {
-    const response = await apiClient.get<FavouritesResponse>("/favourites", {
-      params: { skip, limit: PAGE_LIMIT },
-    });
-    const page = response.data;
-    total = page.total;
-    allItems.push(...page.items);
-
-    if (page.items.length === 0) {
-      break;
-    }
-    skip += page.items.length;
-  }
-
-  return allItems;
-}
-
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
+async function fetchFavouritesPage(skip: number, limit: number): Promise<FavouritesResponse> {
+  const response = await apiClient.get<FavouritesResponse>("/favourites", {
+    params: { skip, limit },
+  });
+  return response.data;
 }
 
 export default function FavouritesPage() {
@@ -69,20 +36,30 @@ export default function FavouritesPage() {
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
+  const [items, setItems] = useState<FavouriteLecture[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const userId = user?.user_id;
 
   const favouritesQuery = useQuery({
     queryKey: ["favourites-page", userId],
     enabled: Boolean(user),
-    queryFn: fetchAllFavourites,
+    queryFn: async () => fetchFavouritesPage(0, PAGE_LIMIT),
   });
+
+  useEffect(() => {
+    if (!favouritesQuery.data) {
+      return;
+    }
+    setItems(favouritesQuery.data.items);
+    setTotal(favouritesQuery.data.total);
+  }, [favouritesQuery.data]);
 
   const removeMutation = useMutation({
     mutationFn: async (lectureId: string) => {
       await apiClient.delete(`/favourites/${lectureId}`);
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["favourites-page", userId] });
       await queryClient.invalidateQueries({ queryKey: ["favourites", userId] });
     },
   });
@@ -100,6 +77,8 @@ export default function FavouritesPage() {
 
     try {
       await removeMutation.mutateAsync(lectureId);
+      setItems((previous) => previous.filter((item) => item.lecture_id !== lectureId));
+      setTotal((previous) => Math.max(0, previous - 1));
     } catch (error) {
       setActionError(extractErrorMessage(error, "Failed to remove from favourites."));
     } finally {
@@ -111,14 +90,29 @@ export default function FavouritesPage() {
     }
   }
 
+  async function handleLoadMore() {
+    if (isLoadingMore || items.length >= total) {
+      return;
+    }
+    setActionError(null);
+    setIsLoadingMore(true);
+    try {
+      const page = await fetchFavouritesPage(items.length, PAGE_LIMIT);
+      setItems((previous) => [...previous, ...page.items]);
+      setTotal(page.total);
+    } catch (error) {
+      setActionError(extractErrorMessage(error, "Failed to load more favourites."));
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }
+
   if (isLoading) {
     return <p>Loading...</p>;
   }
   if (!user) {
     return <Navigate to="/login" replace />;
   }
-
-  const items = favouritesQuery.data ?? [];
 
   return (
     <section style={{ display: "grid", gap: "1rem" }}>
@@ -142,37 +136,44 @@ export default function FavouritesPage() {
       ) : null}
 
       {!favouritesQuery.isLoading && !favouritesQuery.isError && items.length > 0 ? (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th align="left">Title</th>
-              <th align="left">Status</th>
-              <th align="left">Progress</th>
-              <th align="left">Added</th>
-              <th align="left">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={item.lecture_id}>
-                <td>{item.title}</td>
-                <td>{item.status}</td>
-                <td>{item.processing_progress}%</td>
-                <td>{formatDate(item.favourited_at)}</td>
-                <td style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                  <Link to={`/lecture/${item.lecture_id}`}>Open</Link>
-                  <button
-                    disabled={removingIds.has(item.lecture_id)}
-                    onClick={() => handleRemove(item.lecture_id)}
-                    type="button"
-                  >
-                    {removingIds.has(item.lecture_id) ? "Removing..." : "Remove"}
-                  </button>
-                </td>
+        <>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th align="left">Title</th>
+                <th align="left">Status</th>
+                <th align="left">Progress</th>
+                <th align="left">Added</th>
+                <th align="left">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.lecture_id}>
+                  <td>{item.title}</td>
+                  <td>{item.status}</td>
+                  <td>{item.processing_progress}%</td>
+                  <td>{formatDate(item.favourited_at)}</td>
+                  <td style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                    <Link to={`/lecture/${item.lecture_id}`}>Open</Link>
+                    <button
+                      disabled={removingIds.has(item.lecture_id)}
+                      onClick={() => handleRemove(item.lecture_id)}
+                      type="button"
+                    >
+                      {removingIds.has(item.lecture_id) ? "Removing..." : "Remove"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {items.length < total ? (
+            <button disabled={isLoadingMore} onClick={handleLoadMore} type="button">
+              {isLoadingMore ? "Loading..." : "Load more"}
+            </button>
+          ) : null}
+        </>
       ) : null}
     </section>
   );
