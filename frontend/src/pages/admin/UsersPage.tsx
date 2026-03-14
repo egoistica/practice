@@ -78,7 +78,7 @@ export default function UsersPage() {
         return firstPageItems;
       }
       const firstPageIds = new Set(firstPageItems.map((item) => item.id));
-      const tail = previous.slice(firstPageItems.length).filter((item) => !firstPageIds.has(item.id));
+      const tail = previous.filter((item) => !firstPageIds.has(item.id));
       return [...firstPageItems, ...tail].slice(0, usersQuery.data.total);
     });
     setHasHydrated(true);
@@ -201,6 +201,11 @@ export default function UsersPage() {
     }
   }
 
+  const canLoadMore = items.length < total;
+  const showTableSection = !usersQuery.isLoading && !usersQuery.isError && (items.length > 0 || canLoadMore);
+  const showNoUsersMessage =
+    !usersQuery.isLoading && !usersQuery.isError && filteredUsers.length === 0 && !canLoadMore;
+
   return (
     <section style={{ display: "grid", gap: "1rem" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
@@ -239,9 +244,9 @@ export default function UsersPage() {
         </p>
       ) : null}
 
-      {!usersQuery.isLoading && !usersQuery.isError && filteredUsers.length === 0 ? <p>No users found.</p> : null}
+      {showNoUsersMessage ? <p>No users found.</p> : null}
 
-      {!usersQuery.isLoading && !usersQuery.isError && filteredUsers.length > 0 ? (
+      {showTableSection ? (
         <>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
@@ -255,55 +260,61 @@ export default function UsersPage() {
               </tr>
             </thead>
             <tbody>
-              {filteredUsers.map((row) => (
-                <tr key={row.id}>
-                  <td>
-                    {row.username} {row.is_admin ? "(admin)" : ""}
-                  </td>
-                  <td>{row.email}</td>
-                  <td>{row.is_active ? "active" : "inactive"}</td>
-                  <td>{formatDate(row.created_at)}</td>
-                  <td>{row.token_balance}</td>
-                  <td style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                    <button
-                      disabled={isBusy(row.id) || row.id === userId}
-                      onClick={() =>
-                        runUserAction(row.id, async () => {
-                          await updateUserMutation.mutateAsync({ userId: row.id, is_active: !row.is_active });
-                        })
-                      }
-                      type="button"
-                    >
-                      {row.is_active ? "Deactivate" : "Activate"}
-                    </button>
-                    <button
-                      disabled={isBusy(row.id) || row.id === userId}
-                      onClick={() =>
-                        runUserAction(row.id, async () => {
-                          await deactivateUserMutation.mutateAsync(row.id);
-                        })
-                      }
-                      type="button"
-                    >
-                      Delete
-                    </button>
-                    <button
-                      disabled={isBusy(row.id)}
-                      onClick={() => {
-                        setActionError(null);
-                        setActionSuccess(null);
-                        setTokenUser(row);
-                      }}
-                      type="button"
-                    >
-                      Add tokens
-                    </button>
-                  </td>
+              {filteredUsers.length > 0 ? (
+                filteredUsers.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      {row.username} {row.is_admin ? "(admin)" : ""}
+                    </td>
+                    <td>{row.email}</td>
+                    <td>{row.is_active ? "active" : "inactive"}</td>
+                    <td>{formatDate(row.created_at)}</td>
+                    <td>{row.token_balance}</td>
+                    <td style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                      <button
+                        disabled={isBusy(row.id) || row.id === userId}
+                        onClick={() =>
+                          runUserAction(row.id, async () => {
+                            await updateUserMutation.mutateAsync({ userId: row.id, is_active: !row.is_active });
+                          })
+                        }
+                        type="button"
+                      >
+                        {row.is_active ? "Deactivate" : "Activate"}
+                      </button>
+                      <button
+                        disabled={isBusy(row.id) || row.id === userId}
+                        onClick={() =>
+                          runUserAction(row.id, async () => {
+                            await deactivateUserMutation.mutateAsync(row.id);
+                          })
+                        }
+                        type="button"
+                      >
+                        Delete
+                      </button>
+                      <button
+                        disabled={isBusy(row.id)}
+                        onClick={() => {
+                          setActionError(null);
+                          setActionSuccess(null);
+                          setTokenUser(row);
+                        }}
+                        type="button"
+                      >
+                        Add tokens
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6}>No matches for current search filter.</td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
-          {items.length < total ? (
+          {canLoadMore ? (
             <button disabled={isLoadingMore} onClick={handleLoadMore} type="button">
               {isLoadingMore ? "Loading..." : "Load more"}
             </button>
