@@ -2,8 +2,10 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
+import LectureDetailsPage from "./pages/LectureDetails";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
+import UploadPage from "./pages/Upload";
 
 function HomePage() {
   return (
@@ -33,22 +35,6 @@ function ProfilePage() {
       <p>Username: {user.username}</p>
       <p>Email: {user.email}</p>
       <p>Admin: {String(user.is_admin)}</p>
-    </section>
-  );
-}
-
-function UploadPage() {
-  const { isAuthenticated, isLoading } = useAuth();
-  if (isLoading) {
-    return <p>Loading...</p>;
-  }
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
-  }
-  return (
-    <section>
-      <h2>Upload Lecture</h2>
-      <p>Upload form will be implemented in the next task.</p>
     </section>
   );
 }
@@ -89,6 +75,7 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/upload" element={<UploadPage />} />
+        <Route path="/lecture/:lectureId" element={<LectureDetailsPage />} />
       </Routes>
     </main>
   );
