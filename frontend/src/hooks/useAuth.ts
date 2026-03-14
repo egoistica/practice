@@ -1,6 +1,9 @@
+import axios from "axios";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AUTH_TOKEN_STORAGE_KEY, apiClient, setAccessToken } from "../api/client";
+
+const AUTH_REFRESH_TOKEN_STORAGE_KEY = "auth_refresh_token";
 
 type TokenResponse = {
   access_token: string;
@@ -31,6 +34,7 @@ type RegisterPayload = {
 export type UseAuthResult = {
   user: AuthUser | null;
   token: string | null;
+  refreshToken: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (payload: LoginPayload) => Promise<TokenResponse>;
@@ -41,19 +45,30 @@ export type UseAuthResult = {
 
 export function useAuth(): UseAuthResult {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(AUTH_TOKEN_STORAGE_KEY));
+  const [refreshToken, setRefreshToken] = useState<string | null>(() =>
+    localStorage.getItem(AUTH_REFRESH_TOKEN_STORAGE_KEY),
+  );
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(Boolean(token));
 
-  const applyToken = useCallback((nextToken: string | null) => {
-    if (nextToken) {
+  const applyTokens = useCallback((nextToken: string | null, nextRefreshToken: string | null) => {
+    if (nextToken && nextToken.trim()) {
       localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, nextToken);
       setAccessToken(nextToken);
       setToken(nextToken);
+    } else {
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      setAccessToken(null);
+      setToken(null);
+    }
+
+    if (nextRefreshToken && nextRefreshToken.trim()) {
+      localStorage.setItem(AUTH_REFRESH_TOKEN_STORAGE_KEY, nextRefreshToken);
+      setRefreshToken(nextRefreshToken);
       return;
     }
-    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-    setAccessToken(null);
-    setToken(null);
+    localStorage.removeItem(AUTH_REFRESH_TOKEN_STORAGE_KEY);
+    setRefreshToken(null);
   }, []);
 
   const refreshUser = useCallback(async () => {
@@ -66,56 +81,62 @@ export function useAuth(): UseAuthResult {
     try {
       const response = await apiClient.get<AuthUser>("/auth/me");
       setUser(response.data);
-    } catch (_error) {
-      applyToken(null);
-      setUser(null);
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 401 || status === 403) {
+          applyTokens(null, null);
+          setUser(null);
+        }
+      }
     } finally {
       setIsLoading(false);
     }
-  }, [applyToken, token]);
+  }, [applyTokens, token]);
 
   useEffect(() => {
     if (!token) {
       setUser(null);
       setIsLoading(false);
-      setAccessToken(null);
+      applyTokens(null, null);
       return;
     }
     setAccessToken(token);
     void refreshUser();
-  }, [refreshUser, token]);
+  }, [applyTokens, refreshUser, token]);
 
   const login = useCallback(
     async (payload: LoginPayload) => {
       const response = await apiClient.post<TokenResponse>("/auth/login", payload);
-      applyToken(response.data.access_token);
+      applyTokens(response.data.access_token, response.data.refresh_token);
       await refreshUser();
       return response.data;
     },
-    [applyToken, refreshUser],
+    [applyTokens, refreshUser],
   );
 
   const register = useCallback(
     async (payload: RegisterPayload) => {
       const response = await apiClient.post<TokenResponse>("/auth/register", payload);
-      applyToken(response.data.access_token);
+      applyTokens(response.data.access_token, response.data.refresh_token);
       await refreshUser();
       return response.data;
     },
-    [applyToken, refreshUser],
+    [applyTokens, refreshUser],
   );
 
   const logout = useCallback(() => {
-    applyToken(null);
+    applyTokens(null, null);
     setUser(null);
     setIsLoading(false);
-  }, [applyToken]);
+  }, [applyTokens]);
 
   const isAuthenticated = useMemo(() => Boolean(token), [token]);
 
   return {
     user,
     token,
+    refreshToken,
     isAuthenticated,
     isLoading,
     login,
@@ -124,4 +145,3 @@ export function useAuth(): UseAuthResult {
     refreshUser,
   };
 }
-

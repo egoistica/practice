@@ -12,7 +12,15 @@ function HomePage() {
 }
 
 function ProfilePage() {
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
+  if (isLoading) {
+    return (
+      <section>
+        <h2>Profile</h2>
+        <p>Loading profile...</p>
+      </section>
+    );
+  }
   if (!user) {
     return <Navigate to="/" replace />;
   }
@@ -45,4 +53,3 @@ export default function App() {
     </main>
   );
 }
-
