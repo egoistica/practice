@@ -39,7 +39,8 @@ function buildWebSocketUrl(lectureId: string, token: string): string {
     parsed = new URL(window.location.origin);
   }
   const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${parsed.host}/ws/${encodeURIComponent(lectureId)}?token=${encodeURIComponent(token)}`;
+  const normalizedBasePath = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+  return `${protocol}//${parsed.host}${normalizedBasePath}/ws/${encodeURIComponent(lectureId)}?token=${encodeURIComponent(token)}`;
 }
 
 export default function ProgressBar({
