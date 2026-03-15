@@ -50,7 +50,7 @@ export default function AdminDashboardPage() {
       <nav style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
         <Link to="/admin/users">Users</Link>
         <Link to="/admin/statistics">Statistics</Link>
-        <Link to="/admin/database-stats">Database Stats</Link>
+        <Link to="/admin/visits">Visit Stats</Link>
       </nav>
 
       {statsQuery.isLoading ? <p>Loading admin summary...</p> : null}
