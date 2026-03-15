@@ -13,7 +13,12 @@ class BotSettings:
     @classmethod
     def from_env(cls) -> "BotSettings":
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        api_base_url = os.getenv("API_BASE_URL", "http://backend:8000").strip()
+        raw_api_base_url = os.getenv("API_BASE_URL")
+        api_base_url = (
+            raw_api_base_url.strip()
+            if raw_api_base_url and raw_api_base_url.strip()
+            else "http://backend:8000"
+        )
         mode = os.getenv("TELEGRAM_BOT_MODE", "polling").strip().lower() or "polling"
 
         if mode not in {"polling", "webhook"}:
