@@ -5,7 +5,7 @@ import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
 import AdminDashboardPage from "./pages/admin/AdminDashboard";
 import AdminDatabaseStatsPage from "./pages/admin/AdminDatabaseStats";
-import AdminStatisticsPage from "./pages/admin/AdminStatistics";
+import UserStatsPage from "./pages/admin/UserStatsPage";
 import UsersPage from "./pages/admin/UsersPage";
 import FavouritesPage from "./pages/Favourites";
 import HistoryPage from "./pages/History";
@@ -104,7 +104,7 @@ export default function App() {
         <Route element={<AdminRoute />} path="/admin">
           <Route element={<AdminDashboardPage />} index />
           <Route element={<UsersPage />} path="users" />
-          <Route element={<AdminStatisticsPage />} path="statistics" />
+          <Route element={<UserStatsPage />} path="statistics" />
           <Route element={<AdminDatabaseStatsPage />} path="database-stats" />
         </Route>
         <Route path="/profile" element={<ProfilePage />} />
