@@ -4,6 +4,7 @@ import { Link, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
 import AdminDashboardPage from "./pages/admin/AdminDashboard";
+import DatabaseStatsPage from "./pages/admin/DatabaseStatsPage";
 import UserStatsPage from "./pages/admin/UserStatsPage";
 import UsersPage from "./pages/admin/UsersPage";
 import VisitStatsPage from "./pages/admin/VisitStatsPage";
@@ -105,7 +106,7 @@ export default function App() {
           <Route element={<AdminDashboardPage />} index />
           <Route element={<UsersPage />} path="users" />
           <Route element={<UserStatsPage />} path="statistics" />
-          <Route element={<VisitStatsPage />} path="database-stats" />
+          <Route element={<DatabaseStatsPage />} path="database-stats" />
           <Route element={<VisitStatsPage />} path="visits" />
         </Route>
         <Route path="/profile" element={<ProfilePage />} />
