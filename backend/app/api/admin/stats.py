@@ -63,10 +63,25 @@ def _date_series(start_date: date, end_date: date) -> list[date]:
 def _resolve_lecture_file_path(media_root: Path, raw_path: str | None) -> Path | None:
     if not raw_path:
         return None
+    try:
+        resolved_media_root = media_root.resolve(strict=False)
+    except OSError:
+        return None
+
     file_path = Path(raw_path)
-    if file_path.is_absolute():
-        return file_path
-    return media_root / file_path
+    candidate = file_path if file_path.is_absolute() else (resolved_media_root / file_path)
+
+    try:
+        resolved_candidate = candidate.resolve(strict=False)
+    except OSError:
+        return None
+
+    try:
+        resolved_candidate.relative_to(resolved_media_root)
+    except ValueError:
+        return None
+
+    return resolved_candidate
 
 
 def _collect_lecture_file_sizes(
