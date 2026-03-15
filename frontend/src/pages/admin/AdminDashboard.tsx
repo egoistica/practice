@@ -51,6 +51,7 @@ export default function AdminDashboardPage() {
         <Link to="/admin/users">Users</Link>
         <Link to="/admin/statistics">Statistics</Link>
         <Link to="/admin/visits">Visit Stats</Link>
+        <Link to="/admin/database-stats">Database Stats</Link>
       </nav>
 
       {statsQuery.isLoading ? <p>Loading admin summary...</p> : null}

@@ -49,3 +49,19 @@ class AdminVisitsStatsResponse(BaseModel):
     total_visits: int
     daily_visits: list[DailyVisitStat]
     lecture_visits: list[LectureVisitStat]
+
+
+class AdminDbLectureStat(BaseModel):
+    lecture_id: UUID
+    title: str
+    username: str
+    status: str
+    file_size_bytes: int
+
+
+class AdminDbStatsResponse(BaseModel):
+    users_count: int
+    lectures_count: int
+    files_size_bytes: int
+    top_entities: list[TopEntityStat]
+    lectures: list[AdminDbLectureStat]
