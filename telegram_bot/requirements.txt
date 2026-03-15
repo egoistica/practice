@@ -1,1 +1,1 @@
-# Keep requirements minimal for the bootstrap stage.
+aiogram==3.3.0
