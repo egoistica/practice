@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -44,8 +44,7 @@ class AuthStates(StatesGroup):
     waiting_one_time_token = State()
 
 
-@router.message(CommandStart())
-async def handle_start(message: Message, state: FSMContext) -> None:
+async def request_auth_method(message: Message, state: FSMContext) -> None:
     if message.from_user is None:
         return
 
@@ -67,6 +66,11 @@ async def handle_start(message: Message, state: FSMContext) -> None:
         "Привет! Чтобы продолжить, авторизуйтесь.",
         reply_markup=AUTH_METHOD_KEYBOARD,
     )
+
+
+@router.message(Command("login"))
+async def handle_login_command(message: Message, state: FSMContext) -> None:
+    await request_auth_method(message, state)
 
 
 @router.message(AuthStates.waiting_auth_method, F.text == "Войти по email/паролю")
@@ -133,7 +137,7 @@ async def wait_password(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
-    await message.answer("Авторизация успешна. Команды: /me, /logout")
+    await message.answer("Авторизация успешна. Команды: /start, /me, /logout")
 
 
 @router.message(AuthStates.waiting_one_time_token)
@@ -159,4 +163,4 @@ async def wait_one_time_token(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
-    await message.answer("Авторизация успешна. Команды: /me, /logout")
+    await message.answer("Авторизация успешна. Команды: /start, /me, /logout")
