@@ -32,11 +32,7 @@ async def run() -> None:
         dispatcher = Dispatcher()
         register_handlers(dispatcher)
 
-        logging.info(
-            "Starting telegram bot in %s mode (API_BASE_URL=%s)",
-            settings.mode,
-            settings.api_base_url,
-        )
+        logging.info("Starting telegram bot in %s mode", settings.mode)
         await dispatcher.start_polling(bot)
     finally:
         await bot.session.close()
