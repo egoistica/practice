@@ -44,13 +44,21 @@ class AuthStates(StatesGroup):
     waiting_one_time_token = State()
 
 
-async def request_auth_method(message: Message, state: FSMContext) -> None:
-    if message.from_user is None:
+async def request_auth_method(
+    message: Message,
+    state: FSMContext,
+    *,
+    telegram_id: int | None = None,
+) -> None:
+    resolved_telegram_id = telegram_id
+    if resolved_telegram_id is None and message.from_user is not None:
+        resolved_telegram_id = message.from_user.id
+    if resolved_telegram_id is None:
         return
 
     try:
         linked_user = await asyncio.to_thread(
-            ensure_authorized_telegram_user, message.from_user.id
+            ensure_authorized_telegram_user, resolved_telegram_id
         )
         await state.clear()
         await message.answer(

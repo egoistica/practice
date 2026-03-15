@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 from uuid import UUID
 
 import requests
@@ -52,11 +52,13 @@ URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 DEFAULT_API_BASE_URL = "http://backend:8000"
 REQUEST_TIMEOUT_SECONDS = 40
 POLL_INTERVAL_SECONDS = 2
+MAX_PROGRESS_POLLS = 300
 
 
 class UploadStates(StatesGroup):
     waiting_source = State()
     waiting_mode = State()
+    creating_lecture = State()
 
 
 def _api_base_url() -> str:
@@ -68,12 +70,38 @@ def _extract_first_url(text: str) -> str | None:
     match = URL_RE.search(text)
     if not match:
         return None
-    return match.group(0).strip()
+    candidate = match.group(0).strip().rstrip(".,;:!?")
+    return _normalize_public_url(candidate)
+
+
+def _normalize_public_url(raw_url: str) -> str | None:
+    candidate = raw_url.strip().rstrip(".,;:!?")
+    if not candidate:
+        return None
+
+    parsed = urlparse(candidate)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    if not parsed.netloc:
+        return None
+
+    normalized = urlunparse(
+        (
+            scheme,
+            parsed.netloc,
+            parsed.path or "/",
+            "",
+            "",
+            "",
+        )
+    )
+    return normalized or None
 
 
 def _build_upload_title_from_url(url: str) -> str:
-    cleaned = url.strip()
-    return cleaned if len(cleaned) <= 255 else cleaned[:255]
+    normalized = _normalize_public_url(url) or "Video URL"
+    return normalized if len(normalized) <= 255 else normalized[:255]
 
 
 def _build_upload_title_from_filename(file_name: str | None) -> str:
@@ -84,15 +112,16 @@ def _build_upload_title_from_filename(file_name: str | None) -> str:
 
 
 async def _require_authorized_or_start_auth(
-    message: Message, state: FSMContext
+    message: Message,
+    state: FSMContext,
+    *,
+    telegram_id: int,
 ) -> bool:
-    if message.from_user is None:
-        return False
     try:
-        await asyncio.to_thread(ensure_authorized_telegram_user, message.from_user.id)
+        await asyncio.to_thread(ensure_authorized_telegram_user, telegram_id)
         return True
     except BotAuthError:
-        await request_auth_method(message, state)
+        await request_auth_method(message, state, telegram_id=telegram_id)
         return False
 
 
@@ -125,19 +154,20 @@ def _api_post_lecture_file(
     mode: str,
     file_name: str,
     content_type: str,
-    file_bytes: bytes,
+    file_path: str,
 ) -> dict[str, Any]:
-    response = requests.post(
-        f"{_api_base_url().rstrip('/')}/lectures",
-        headers={"Authorization": f"Bearer {token}"},
-        data={
-            "title": title,
-            "mode": mode,
-            "source_type": "file",
-        },
-        files={"file": (file_name, file_bytes, content_type)},
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
+    with open(file_path, "rb") as stream:
+        response = requests.post(
+            f"{_api_base_url().rstrip('/')}/lectures",
+            headers={"Authorization": f"Bearer {token}"},
+            data={
+                "title": title,
+                "mode": mode,
+                "source_type": "file",
+            },
+            files={"file": (file_name, stream, content_type)},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
     if response.status_code >= 400:
         raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
     return response.json()
@@ -236,7 +266,7 @@ async def _monitor_lecture_progress(
 ) -> None:
     last_snapshot: tuple[str, int] | None = None
 
-    while True:
+    for _attempt in range(1, MAX_PROGRESS_POLLS + 1):
         try:
             token = await _authorized_token_for_telegram_user(telegram_id)
             payload = await asyncio.to_thread(_api_get_lecture, token, lecture_id)
@@ -281,9 +311,25 @@ async def _monitor_lecture_progress(
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
+    await _safe_edit_message(
+        bot,
+        chat_id,
+        message_id,
+        "Превышено время ожидания обработки. Проверьте статус лекции позже через /start.",
+    )
 
-async def _start_upload_flow(message: Message, state: FSMContext) -> None:
-    if not await _require_authorized_or_start_auth(message, state):
+
+async def _start_upload_flow(
+    message: Message,
+    state: FSMContext,
+    *,
+    telegram_id: int,
+) -> None:
+    if not await _require_authorized_or_start_auth(
+        message,
+        state,
+        telegram_id=telegram_id,
+    ):
         return
     await state.set_state(UploadStates.waiting_source)
     await state.update_data(upload_payload=None)
@@ -294,21 +340,29 @@ async def _start_upload_flow(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("upload"))
 async def handle_upload_command(message: Message, state: FSMContext) -> None:
-    await _start_upload_flow(message, state)
+    if message.from_user is None:
+        return
+    await _start_upload_flow(message, state, telegram_id=message.from_user.id)
 
 
 @router.message(F.text == "📤 Загрузить")
 async def handle_upload_button(message: Message, state: FSMContext) -> None:
-    await _start_upload_flow(message, state)
+    if message.from_user is None:
+        return
+    await _start_upload_flow(message, state, telegram_id=message.from_user.id)
 
 
 @router.callback_query(F.data == "menu:upload")
 async def handle_upload_menu_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    if callback.message is None:
+    if callback.message is None or callback.from_user is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
     await callback.answer()
-    await _start_upload_flow(callback.message, state)
+    await _start_upload_flow(
+        callback.message,
+        state,
+        telegram_id=callback.from_user.id,
+    )
 
 
 @router.message(UploadStates.waiting_source, F.video)
@@ -369,6 +423,11 @@ async def handle_upload_unknown_source(message: Message) -> None:
     await message.answer("Отправьте видеофайл или URL-ссылку.")
 
 
+@router.callback_query(UploadStates.creating_lecture, F.data.startswith("upload:mode:"))
+async def handle_upload_mode_in_progress(callback: CallbackQuery) -> None:
+    await callback.answer("Лекция уже создается, подождите...", show_alert=True)
+
+
 @router.callback_query(UploadStates.waiting_mode, F.data.startswith("upload:mode:"))
 async def handle_upload_mode(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.from_user is None or callback.message is None:
@@ -387,6 +446,7 @@ async def handle_upload_mode(callback: CallbackQuery, state: FSMContext) -> None
         await state.set_state(UploadStates.waiting_source)
         return
 
+    await state.set_state(UploadStates.creating_lecture)
     await callback.answer("Запускаю обработку...")
 
     try:
@@ -410,18 +470,33 @@ async def handle_upload_mode(callback: CallbackQuery, state: FSMContext) -> None
             if not file_id:
                 raise BotAuthError("Отсутствует file_id для загрузки")
             telegram_file = await callback.bot.get_file(file_id)
-            buffer = io.BytesIO()
-            await callback.bot.download_file(telegram_file.file_path, destination=buffer)
-            file_bytes = buffer.getvalue()
-            lecture_response = await asyncio.to_thread(
-                _api_post_lecture_file,
-                token,
-                title=str(payload.get("title", "Telegram upload")),
-                mode=mode,
-                file_name=str(payload.get("file_name", "upload.bin")),
-                content_type=str(payload.get("content_type", "application/octet-stream")),
-                file_bytes=file_bytes,
-            )
+            suffix = Path(str(payload.get("file_name", ""))).suffix or ".bin"
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                    temp_path = temp_file.name
+
+                with open(temp_path, "wb") as temp_stream:
+                    await callback.bot.download_file(
+                        telegram_file.file_path,
+                        destination=temp_stream,
+                    )
+
+                lecture_response = await asyncio.to_thread(
+                    _api_post_lecture_file,
+                    token,
+                    title=str(payload.get("title", "Telegram upload")),
+                    mode=mode,
+                    file_name=str(payload.get("file_name", "upload.bin")),
+                    content_type=str(payload.get("content_type", "application/octet-stream")),
+                    file_path=temp_path,
+                )
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
     except Exception as exc:
         await callback.message.answer(f"Не удалось создать лекцию: {exc}")
         await state.set_state(UploadStates.waiting_source)
