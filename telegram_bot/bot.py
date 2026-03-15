@@ -7,9 +7,11 @@ from aiogram import Bot, Dispatcher
 
 try:
     from telegram_bot.config import BotSettings
+    from telegram_bot.db import init_db
     from telegram_bot.handlers import register_handlers
 except ModuleNotFoundError:
     from config import BotSettings
+    from db import init_db
     from handlers import register_handlers
 
 
@@ -29,6 +31,7 @@ async def run() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     try:
+        init_db()
         dispatcher = Dispatcher()
         register_handlers(dispatcher)
 
