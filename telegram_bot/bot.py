@@ -9,10 +9,12 @@ try:
     from telegram_bot.config import BotSettings
     from telegram_bot.db import init_db
     from telegram_bot.handlers import register_handlers
+    from telegram_bot.handlers.upload import cancel_background_tasks
 except ModuleNotFoundError:
     from config import BotSettings
     from db import init_db
     from handlers import register_handlers
+    from handlers.upload import cancel_background_tasks
 
 
 def configure_logging() -> None:
@@ -39,6 +41,10 @@ async def run() -> None:
         await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(bot)
     finally:
+        try:
+            await cancel_background_tasks(bot)
+        except Exception:
+            logging.exception("Failed to cancel upload background tasks")
         await bot.session.close()
 
 
