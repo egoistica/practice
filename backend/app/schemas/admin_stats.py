@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -27,3 +28,24 @@ class AdminUsersStatsResponse(BaseModel):
     end_date: date
     total_new_users: int
     items: list[DailyUserRegistrationsStat]
+
+
+class DailyVisitStat(BaseModel):
+    date: date
+    visits: int
+
+
+class LectureVisitStat(BaseModel):
+    lecture_id: UUID
+    lecture_title: str
+    visits: int
+    last_visited_at: datetime
+
+
+class AdminVisitsStatsResponse(BaseModel):
+    start_date: date
+    end_date: date
+    user_id: UUID | None
+    total_visits: int
+    daily_visits: list[DailyVisitStat]
+    lecture_visits: list[LectureVisitStat]

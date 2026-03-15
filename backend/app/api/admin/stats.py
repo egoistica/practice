@@ -4,6 +4,7 @@ import asyncio
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -12,12 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.dependencies import get_db, require_admin
 from app.models.entity_graph import EntityGraph
+from app.models.history import History
 from app.models.lecture import Lecture
 from app.models.user import User
 from app.schemas.admin_stats import (
     AdminOverviewStatsResponse,
+    AdminVisitsStatsResponse,
     AdminUsersStatsResponse,
+    DailyVisitStat,
     DailyUserRegistrationsStat,
+    LectureVisitStat,
     TopEntityStat,
 )
 
@@ -133,4 +138,82 @@ async def get_admin_users_stats(
         end_date=resolved_end,
         total_new_users=total_new_users,
         items=items,
+    )
+
+
+@router.get("/visits", response_model=AdminVisitsStatsResponse)
+async def get_admin_visits_stats(
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    user_id: UUID | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    _admin_user: User = Depends(require_admin),
+) -> AdminVisitsStatsResponse:
+    today = date.today()
+    resolved_end = end_date or today
+    resolved_start = start_date or (resolved_end - timedelta(days=29))
+
+    if resolved_start > resolved_end:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be less than or equal to end_date",
+        )
+
+    visited_date = func.date(History.visited_at)
+    filters = [visited_date >= resolved_start, visited_date <= resolved_end]
+    if user_id is not None:
+        filters.append(History.user_id == user_id)
+
+    daily_rows = (
+        await db.execute(
+            select(visited_date.label("visited_day"), func.count(History.id).label("visits"))
+            .where(*filters)
+            .group_by(visited_date)
+            .order_by(visited_date.asc())
+        )
+    ).all()
+
+    counts_by_day = {
+        row.visited_day: int(row.visits)
+        for row in daily_rows
+        if row.visited_day is not None
+    }
+    daily_visits = [
+        DailyVisitStat(date=day, visits=counts_by_day.get(day, 0))
+        for day in _date_series(resolved_start, resolved_end)
+    ]
+
+    lecture_rows = (
+        await db.execute(
+            select(
+                History.lecture_id.label("lecture_id"),
+                Lecture.title.label("lecture_title"),
+                func.count(History.id).label("visits"),
+                func.max(History.visited_at).label("last_visited_at"),
+            )
+            .join(Lecture, Lecture.id == History.lecture_id)
+            .where(*filters)
+            .group_by(History.lecture_id, Lecture.title)
+            .order_by(func.count(History.id).desc(), func.max(History.visited_at).desc())
+        )
+    ).all()
+
+    lecture_visits = [
+        LectureVisitStat(
+            lecture_id=row.lecture_id,
+            lecture_title=row.lecture_title,
+            visits=int(row.visits),
+            last_visited_at=row.last_visited_at,
+        )
+        for row in lecture_rows
+        if row.lecture_id is not None and row.last_visited_at is not None
+    ]
+
+    return AdminVisitsStatsResponse(
+        start_date=resolved_start,
+        end_date=resolved_end,
+        user_id=user_id,
+        total_visits=sum(item.visits for item in daily_visits),
+        daily_visits=daily_visits,
+        lecture_visits=lecture_visits,
     )
