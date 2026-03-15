@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import tempfile
@@ -10,7 +11,7 @@ from urllib.parse import quote, urlparse, urlunparse
 from uuid import UUID
 
 import requests
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -31,6 +32,7 @@ except ModuleNotFoundError:
     from handlers.auth import request_auth_method
 
 router = Router(name="upload")
+logger = logging.getLogger(__name__)
 
 UPLOAD_MODE_KEYBOARD = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -53,6 +55,8 @@ DEFAULT_API_BASE_URL = "http://backend:8000"
 REQUEST_TIMEOUT_SECONDS = 40
 POLL_INTERVAL_SECONDS = 2
 MAX_PROGRESS_POLLS = 300
+_URL_TRAILING_CHARS = ".,;:!?)]}>"
+_BOT_TASKS_ATTR = "_upload_background_tasks"
 
 
 class UploadStates(StatesGroup):
@@ -70,12 +74,12 @@ def _extract_first_url(text: str) -> str | None:
     match = URL_RE.search(text)
     if not match:
         return None
-    candidate = match.group(0).strip().rstrip(".,;:!?")
+    candidate = match.group(0).strip().rstrip(_URL_TRAILING_CHARS)
     return _normalize_public_url(candidate)
 
 
 def _normalize_public_url(raw_url: str) -> str | None:
-    candidate = raw_url.strip().rstrip(".,;:!?")
+    candidate = raw_url.strip().rstrip(_URL_TRAILING_CHARS)
     if not candidate:
         return None
 
@@ -130,6 +134,19 @@ async def _authorized_token_for_telegram_user(telegram_id: int) -> str:
     return linked_user.jwt_token
 
 
+def _raise_api_error(response: requests.Response, *, context: str) -> None:
+    raw_body = response.text.strip()
+    logger.error(
+        "Backend API request failed context=%s status=%s body=%s",
+        context,
+        response.status_code,
+        raw_body,
+    )
+    if response.status_code in (401, 403):
+        raise BotAuthError(f"Authentication failed (HTTP {response.status_code})")
+    raise BotAuthError(f"Request failed (HTTP {response.status_code})")
+
+
 def _api_post_lecture_url(token: str, *, title: str, mode: str, source_url: str) -> dict[str, Any]:
     response = requests.post(
         f"{_api_base_url().rstrip('/')}/lectures",
@@ -143,7 +160,7 @@ def _api_post_lecture_url(token: str, *, title: str, mode: str, source_url: str)
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="post_lecture_url")
     return response.json()
 
 
@@ -169,7 +186,7 @@ def _api_post_lecture_file(
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="post_lecture_file")
     return response.json()
 
 
@@ -180,7 +197,7 @@ def _api_get_lecture(token: str, lecture_id: str) -> dict[str, Any]:
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="get_lecture")
     return response.json()
 
 
@@ -191,7 +208,7 @@ def _api_get_summary(token: str, lecture_id: str) -> dict[str, Any]:
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="get_summary")
     return response.json()
 
 
@@ -202,7 +219,7 @@ def _api_get_graph(token: str, lecture_id: str) -> dict[str, Any]:
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="get_graph")
     return response.json()
 
 
@@ -213,7 +230,7 @@ def _api_export_markdown(token: str, lecture_id: str) -> bytes:
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="export_markdown")
     return response.content
 
 
@@ -224,7 +241,41 @@ def _api_add_favourite(token: str, lecture_id: str) -> None:
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise BotAuthError(response.text.strip() or f"HTTP {response.status_code}")
+        _raise_api_error(response, context="add_favourite")
+
+
+def _bot_background_tasks(bot: Bot) -> set[asyncio.Task[Any]]:
+    tasks = getattr(bot, _BOT_TASKS_ATTR, None)
+    if isinstance(tasks, set):
+        return tasks
+    tasks = set()
+    setattr(bot, _BOT_TASKS_ATTR, tasks)
+    return tasks
+
+
+def _track_background_task(bot: Bot, task: asyncio.Task[Any], *, task_key: str) -> None:
+    tasks = _bot_background_tasks(bot)
+    tasks.add(task)
+
+    def _on_done(done_task: asyncio.Task[Any]) -> None:
+        tasks.discard(done_task)
+        if done_task.cancelled():
+            return
+        exc = done_task.exception()
+        if exc is not None:
+            logger.exception("Background upload task failed task_key=%s", task_key, exc_info=exc)
+
+    task.add_done_callback(_on_done)
+
+
+async def cancel_background_tasks(bot: Bot) -> None:
+    tasks = list(_bot_background_tasks(bot))
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _bot_background_tasks(bot).clear()
 
 
 def _status_text(status: str, progress: int) -> str:
@@ -510,14 +561,20 @@ async def handle_upload_mode(callback: CallbackQuery, state: FSMContext) -> None
 
     await state.clear()
     progress_message = await callback.message.answer("Обрабатывается... ⏳\nСтатус: pending\nПрогресс: 0%")
-    asyncio.create_task(
+    task = asyncio.create_task(
         _monitor_lecture_progress(
             callback.bot,
             chat_id=progress_message.chat.id,
             message_id=progress_message.message_id,
             telegram_id=callback.from_user.id,
             lecture_id=lecture_id,
-        )
+        ),
+        name=f"upload-progress:{lecture_id}:{progress_message.message_id}",
+    )
+    _track_background_task(
+        callback.bot,
+        task,
+        task_key=f"{lecture_id}:{progress_message.message_id}",
     )
 
 
