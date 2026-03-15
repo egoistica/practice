@@ -119,7 +119,7 @@ def login_with_one_time_token(raw_token: str) -> AuthTokens:
             access_token=str(payload.get("access_token", "")),
             refresh_token=str(payload.get("refresh_token", "")) or token,
         )
-    except BotAuthError:
+    except APIUnauthorizedError:
         me = _get("/auth/me", auth_token=token)
         return AuthTokens(
             user_id=str(me.get("user_id", "")),
@@ -197,9 +197,16 @@ def ensure_authorized_telegram_user(telegram_id: int) -> TelegramUser:
             refreshed = _refresh_access_token(user.refresh_token)
             user.jwt_token = refreshed.access_token
             user.refresh_token = refreshed.refresh_token
-            _get("/auth/me", auth_token=user.jwt_token)
-            session.flush()
-            return user
+            session.commit()
+
+            try:
+                _get("/auth/me", auth_token=user.jwt_token)
+                session.flush()
+                return user
+            except BotAuthError as exc:
+                session.delete(user)
+                session.commit()
+                raise BotAuthError("Session expired. Use /start to authorize again.") from exc
 
 
 def fetch_profile(access_token: str) -> dict[str, Any]:

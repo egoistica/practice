@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import Router
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message
@@ -22,8 +24,10 @@ async def handle_me(message: Message) -> None:
     if message.from_user is None:
         return
     try:
-        linked_user = ensure_authorized_telegram_user(message.from_user.id)
-        profile = fetch_profile(linked_user.jwt_token)
+        linked_user = await asyncio.to_thread(
+            ensure_authorized_telegram_user, message.from_user.id
+        )
+        profile = await asyncio.to_thread(fetch_profile, linked_user.jwt_token)
     except BotAuthError as exc:
         await message.answer(f"Не авторизован: {exc}")
         return
@@ -41,7 +45,7 @@ async def handle_me(message: Message) -> None:
 async def handle_logout(message: Message) -> None:
     if message.from_user is None:
         return
-    clear_telegram_user_auth(message.from_user.id)
+    await asyncio.to_thread(clear_telegram_user_auth, message.from_user.id)
     await message.answer("Сессия очищена. Используйте /start для повторной авторизации.")
 
 
@@ -50,7 +54,7 @@ async def handle_message(message: Message) -> None:
     if message.from_user is None:
         return
     try:
-        ensure_authorized_telegram_user(message.from_user.id)
+        await asyncio.to_thread(ensure_authorized_telegram_user, message.from_user.id)
     except BotAuthError as exc:
         await message.answer(f"{exc}\nЗапустите /start для авторизации.")
         return

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -48,7 +50,9 @@ async def handle_start(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        linked_user = ensure_authorized_telegram_user(message.from_user.id)
+        linked_user = await asyncio.to_thread(
+            ensure_authorized_telegram_user, message.from_user.id
+        )
         await state.clear()
         await message.answer(
             f"Вы уже авторизованы (user_id={linked_user.user_id}).\n"
@@ -91,7 +95,11 @@ async def wait_login(message: Message, state: FSMContext) -> None:
 
     await state.update_data(login_value=login_value)
     await state.set_state(AuthStates.waiting_password)
-    await message.answer("Введите пароль:")
+    await message.answer(
+        "Введите пароль:\n"
+        "Внимание: Telegram не является безопасным менеджером паролей. "
+        "Если возможно, используйте одноразовый токен."
+    )
 
 
 @router.message(AuthStates.waiting_password)
@@ -112,8 +120,9 @@ async def wait_password(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        tokens = login_with_password(login_value, password)
-        save_telegram_user_auth(
+        tokens = await asyncio.to_thread(login_with_password, login_value, password)
+        await asyncio.to_thread(
+            save_telegram_user_auth,
             telegram_id=message.from_user.id,
             username=message.from_user.username,
             tokens=tokens,
@@ -138,8 +147,9 @@ async def wait_one_time_token(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        tokens = login_with_one_time_token(token)
-        save_telegram_user_auth(
+        tokens = await asyncio.to_thread(login_with_one_time_token, token)
+        await asyncio.to_thread(
+            save_telegram_user_auth,
             telegram_id=message.from_user.id,
             username=message.from_user.username,
             tokens=tokens,
