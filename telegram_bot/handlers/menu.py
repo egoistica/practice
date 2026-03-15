@@ -72,6 +72,18 @@ async def _send_section(message: Message, title: str, details: str) -> None:
     )
 
 
+async def _require_authorized_callback(callback: CallbackQuery) -> bool:
+    if callback.from_user is None:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return False
+    try:
+        await asyncio.to_thread(ensure_authorized_telegram_user, callback.from_user.id)
+        return True
+    except BotAuthError:
+        await callback.answer("Сессия истекла. Используйте /start.", show_alert=True)
+        return False
+
+
 @router.message(Command("start"))
 async def handle_start(message: Message, state: FSMContext) -> None:
     if not await _require_authorized_or_start_auth(message, state):
@@ -135,7 +147,7 @@ async def handle_balance(message: Message, state: FSMContext) -> None:
     await _send_section(
         message,
         "💰 Мой баланс",
-        "Баланс токенов будет показан после подключения endpoint'а баланса.",
+        "Баланс токенов будет показан после подключения эндпоинта баланса.",
     )
 
 
@@ -146,6 +158,8 @@ async def handle_help_button(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:upload")
 async def callback_upload(callback: CallbackQuery) -> None:
+    if not await _require_authorized_callback(callback):
+        return
     if callback.message:
         await callback.message.answer("📤 Раздел загрузки открыт.")
     await callback.answer()
@@ -153,6 +167,8 @@ async def callback_upload(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:history")
 async def callback_history(callback: CallbackQuery) -> None:
+    if not await _require_authorized_callback(callback):
+        return
     if callback.message:
         await callback.message.answer("📖 Раздел истории открыт.")
     await callback.answer()
@@ -160,6 +176,8 @@ async def callback_history(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:favourites")
 async def callback_favourites(callback: CallbackQuery) -> None:
+    if not await _require_authorized_callback(callback):
+        return
     if callback.message:
         await callback.message.answer("⭐ Раздел избранного открыт.")
     await callback.answer()
@@ -167,6 +185,8 @@ async def callback_favourites(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:balance")
 async def callback_balance(callback: CallbackQuery) -> None:
+    if not await _require_authorized_callback(callback):
+        return
     if callback.message:
         await callback.message.answer("💰 Раздел баланса открыт.")
     await callback.answer()
@@ -174,6 +194,8 @@ async def callback_balance(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:help")
 async def callback_help(callback: CallbackQuery) -> None:
+    if not await _require_authorized_callback(callback):
+        return
     if callback.message:
         await callback.message.answer("❓ Используйте /help для списка команд.")
     await callback.answer()
