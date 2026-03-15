@@ -33,6 +33,7 @@ async def run() -> None:
         register_handlers(dispatcher)
 
         logging.info("Starting telegram bot in %s mode", settings.mode)
+        await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(bot)
     finally:
         await bot.session.close()
