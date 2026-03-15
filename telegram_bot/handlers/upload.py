@@ -75,10 +75,10 @@ def _extract_first_url(text: str) -> str | None:
     if not match:
         return None
     candidate = match.group(0).strip().rstrip(_URL_TRAILING_CHARS)
-    return _normalize_public_url(candidate)
+    return _normalize_public_url(candidate, preserve_query=True)
 
 
-def _normalize_public_url(raw_url: str) -> str | None:
+def _normalize_public_url(raw_url: str, *, preserve_query: bool = False) -> str | None:
     candidate = raw_url.strip().rstrip(_URL_TRAILING_CHARS)
     if not candidate:
         return None
@@ -96,15 +96,15 @@ def _normalize_public_url(raw_url: str) -> str | None:
             parsed.netloc,
             parsed.path or "/",
             "",
-            "",
-            "",
+            parsed.query if preserve_query else "",
+            parsed.fragment if preserve_query else "",
         )
     )
     return normalized or None
 
 
 def _build_upload_title_from_url(url: str) -> str:
-    normalized = _normalize_public_url(url) or "Video URL"
+    normalized = _normalize_public_url(url, preserve_query=False) or "Video URL"
     return normalized if len(normalized) <= 255 else normalized[:255]
 
 
