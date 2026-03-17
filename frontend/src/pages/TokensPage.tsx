@@ -14,7 +14,7 @@ import { useAuth } from "../hooks/useAuth";
 import { extractErrorMessage, formatDate } from "../utils/presentation";
 
 type TokenHistoryRow = TokenTransaction & {
-  balance_after: number;
+  balance_after?: number;
 };
 
 const PAGE_LIMIT = 50;
@@ -69,7 +69,13 @@ export default function TokensPage() {
   }, [historyQuery.data]);
 
   const historyRows = useMemo<TokenHistoryRow[]>(() => {
-    const currentBalance = balanceQuery.data?.balance ?? 0;
+    if (balanceQuery.data?.balance === undefined) {
+      return items.map((item) => ({
+        ...item,
+        balance_after: undefined,
+      }));
+    }
+    const currentBalance = balanceQuery.data.balance;
     let runningBalance = currentBalance;
     return items.map((item) => {
       const row: TokenHistoryRow = {
@@ -198,7 +204,7 @@ export default function TokensPage() {
                         {sign}
                         {amount}
                       </td>
-                      <td align="right">{row.balance_after}</td>
+                      <td align="right">{row.balance_after ?? "—"}</td>
                     </tr>
                   );
                 })}
