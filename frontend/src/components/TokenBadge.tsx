@@ -1,34 +1,14 @@
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { apiClient } from "../api/client";
+import { fetchTokenBalance, tokensBalanceQueryKey } from "../api/tokens";
 import { useAuth } from "../hooks/useAuth";
-
-type TokenBalanceResponse = {
-  balance: number;
-  transactions: Array<{
-    id: string;
-    amount: number;
-    reason: string;
-    created_at: string;
-  }>;
-};
-
-async function fetchTokenBalance(): Promise<TokenBalanceResponse> {
-  const response = await apiClient.get<TokenBalanceResponse>("/tokens/balance", {
-    params: {
-      include_transactions: false,
-      transactions_limit: 0,
-    },
-  });
-  return response.data;
-}
 
 export default function TokenBadge() {
   const { user, isLoading: isAuthLoading } = useAuth();
   const userId = user?.user_id;
   const balanceQuery = useQuery({
-    queryKey: ["tokens-balance", userId],
+    queryKey: tokensBalanceQueryKey(userId),
     enabled: Boolean(userId),
     queryFn: fetchTokenBalance,
     refetchInterval: 30_000,
@@ -46,7 +26,7 @@ export default function TokenBadge() {
 
   return (
     <Link
-      aria-label="Open tokens page"
+      aria-label="Открыть страницу токенов"
       style={{
         textDecoration: "none",
         padding: "0.35rem 0.6rem",
