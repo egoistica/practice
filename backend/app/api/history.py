@@ -69,22 +69,14 @@ async def remove_from_history(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, str]:
-    history_rows = (
-        await db.execute(
-            select(History).where(
-                History.user_id == user.id,
-                History.lecture_id == lecture_id,
-            )
-        )
-    ).scalars().all()
-    if not history_rows:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History entry not found")
-
-    await db.execute(
+    result = await db.execute(
         delete(History).where(
             History.user_id == user.id,
             History.lecture_id == lecture_id,
         )
     )
+    if (result.rowcount or 0) == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History entry not found")
+
     await db.commit()
     return {"status": "deleted", "lecture_id": str(lecture_id)}
