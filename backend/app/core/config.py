@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_FALLBACK_MODELS: str = ""
     MEDIA_ROOT: str = "/media"
+    COST_TRANSCRIBE: int = 50
+    COST_SUMMARIZE: int = 30
+    COST_EXTRACT_ENTITIES: int = 40
+    COST_ENRICH: int = 25
 
     @property
     def is_dev_mode(self) -> bool:
@@ -118,6 +122,9 @@ class Settings(BaseSettings):
             raise RuntimeError("JWT_ALGORITHM must be set")
         if int(getattr(self, "ACCESS_TOKEN_EXPIRE_MINUTES", 0)) <= 0:
             raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be greater than zero")
+        for cost_key in ("COST_TRANSCRIBE", "COST_SUMMARIZE", "COST_EXTRACT_ENTITIES", "COST_ENRICH"):
+            if int(getattr(self, cost_key, 0)) < 0:
+                raise RuntimeError(f"{cost_key} must be greater than or equal to zero")
 
         if not self.is_dev_mode:
             database_url = str(getattr(self, "DATABASE_URL", ""))
@@ -198,6 +205,10 @@ def get_settings() -> Settings:
             OLLAMA_BASE_URL=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             OLLAMA_FALLBACK_MODELS=os.getenv("OLLAMA_FALLBACK_MODELS", ""),
             MEDIA_ROOT=os.getenv("MEDIA_ROOT", "/media"),
+            COST_TRANSCRIBE=int(os.getenv("COST_TRANSCRIBE", "50")),
+            COST_SUMMARIZE=int(os.getenv("COST_SUMMARIZE", "30")),
+            COST_EXTRACT_ENTITIES=int(os.getenv("COST_EXTRACT_ENTITIES", "40")),
+            COST_ENRICH=int(os.getenv("COST_ENRICH", "25")),
         )
 
     current_settings.validate_runtime_config()
