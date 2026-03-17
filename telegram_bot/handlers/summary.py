@@ -20,6 +20,11 @@ router = Router(name="summary")
 REQUEST_TIMEOUT_SECONDS = 40
 MAX_MESSAGE_LEN = 3800
 _CHUNK_SAFETY_MARGIN = 32
+_HEADER_BODY_RESERVE = 200
+_HEADER_MAX_LEN = MAX_MESSAGE_LEN - _HEADER_BODY_RESERVE
+_HEADER_TITLE_MAX_RAW = 256
+_HEADER_TYPE_MAX_RAW = 64
+_HEADER_TIMECODE_MAX_RAW = 48
 
 _QUOTE_TERM_RE = re.compile(r"[\"«]([^\"»]{2,80})[\"»]")
 _DEF_TERM_RE = re.compile(r"(?:^|[\n\.]\s*)([A-ZА-Я][A-Za-zА-Яа-я0-9\- ]{2,40}):")
@@ -76,6 +81,17 @@ def _escape_markdown_v2(text: str) -> str:
     return escaped
 
 
+def _truncate_raw(value: str, max_len: int) -> str:
+    text = value.strip()
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return f"{text[: max_len - 3]}..."
+
+
 def _highlight_terms_in_escaped_text(escaped_text: str, terms: list[str]) -> str:
     highlighted = escaped_text
     for term in terms:
@@ -116,17 +132,28 @@ def _split_escaped_text(escaped_text: str, max_len: int) -> list[str]:
 
 
 def _build_block_header(block: dict[str, Any]) -> str:
-    title = _escape_markdown_v2(str(block.get("title", "Блок")).strip() or "Блок")
-    block_type = _escape_markdown_v2(str(block.get("type", "thought")).strip() or "thought")
+    raw_title = _truncate_raw(str(block.get("title", "Блок")) or "Блок", _HEADER_TITLE_MAX_RAW) or "Блок"
+    raw_block_type = _truncate_raw(
+        str(block.get("type", "thought")) or "thought",
+        _HEADER_TYPE_MAX_RAW,
+    ) or "thought"
+    title = _escape_markdown_v2(raw_title)
+    block_type = _escape_markdown_v2(raw_block_type)
     time_start = block.get("timecode_start")
     time_end = block.get("timecode_end")
 
     header = f"*\\#\\# {title}*\n_Тип: {block_type}_"
     if time_start is not None or time_end is not None:
+        raw_time_start = _truncate_raw(str(time_start), _HEADER_TIMECODE_MAX_RAW)
+        raw_time_end = _truncate_raw(str(time_end), _HEADER_TIMECODE_MAX_RAW)
         header += (
             "\n_Таймкод: "
-            f"{_escape_markdown_v2(str(time_start))} - {_escape_markdown_v2(str(time_end))}_"
+            f"{_escape_markdown_v2(raw_time_start)} - {_escape_markdown_v2(raw_time_end)}_"
         )
+    if len(header) > _HEADER_MAX_LEN:
+        header = header[:_HEADER_MAX_LEN].rstrip()
+        while header.endswith("\\"):
+            header = header[:-1]
     return header.strip()
 
 
