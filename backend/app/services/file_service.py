@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import stat
@@ -79,10 +80,9 @@ def _parse_clamav_result(result: Any, scanned_path: Path) -> tuple[bool, str | N
         if isinstance(entry, tuple) and len(entry) >= 1 and str(entry[0]).upper() == "FOUND":
             signature = str(entry[1]) if len(entry) > 1 and entry[1] else "unknown-signature"
             return True, signature
-        # Conservative fallback for unknown dict shape.
-        return True, "unknown-signature"
+        return False, None
 
-    return True, "unknown-signature"
+    return False, None
 
 
 def _scan_file_with_clamav(path: Path) -> None:
@@ -142,7 +142,7 @@ async def save_uploaded_file(
                     raise ValueError(f"File is too large. Maximum size is {max_upload_size} bytes")
                 await file_obj.write(chunk)
 
-        _scan_file_with_clamav(temp_destination)
+        await asyncio.to_thread(_scan_file_with_clamav, temp_destination)
         temp_destination.replace(destination)
         return str(Path(str(lecture_id)) / stored_name)
     except Exception:
