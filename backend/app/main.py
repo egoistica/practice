@@ -27,6 +27,7 @@ from .api import (
 from .core.config import settings
 from .core.dependencies import get_celery_app
 from .core.limiter import limiter, rate_limit_exceeded_handler
+from .core.logging import setup_logging
 from .core.ownership import extract_bearer_token, extract_lecture_id_from_path
 from .core.security import decode_token
 from .models.lecture import Lecture
@@ -34,6 +35,7 @@ from .services.progress_service import start_progress_listener, stop_progress_li
 from .core.database import AsyncSessionLocal
 
 
+setup_logging("backend")
 logger = logging.getLogger(__name__)
 
 

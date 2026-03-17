@@ -7,9 +7,14 @@ from celery import Celery
 try:
     from backend.app.core.celery_config import CeleryConfig
     from backend.app.core.config import settings
+    from backend.app.core.logging import setup_logging
 except ModuleNotFoundError:
     from app.core.celery_config import CeleryConfig
     from app.core.config import settings
+    from app.core.logging import setup_logging
+
+
+setup_logging("celery_worker")
 
 
 celery_config = CeleryConfig.from_settings(settings)
