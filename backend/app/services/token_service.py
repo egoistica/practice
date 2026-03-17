@@ -21,7 +21,9 @@ def _normalize_idempotency_key(raw_value: str | None) -> str | None:
     key = raw_value.strip()
     if not key:
         return None
-    return key[:191]
+    if len(key) > 191:
+        raise ValueError("idempotency_key is too long; maximum length is 191 characters")
+    return key
 
 
 async def check_balance(user_id: UUID, required: int) -> bool:
