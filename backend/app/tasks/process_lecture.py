@@ -29,6 +29,7 @@ from app.services.progress_service import broadcast_lecture_event_sync, broadcas
 from app.services.text_processing import segment_text
 from app.services.token_service import (
     InsufficientTokenBalanceError,
+    check_balance,
     deduct_tokens,
 )
 from app.services.transcription_service import transcribe_audio
@@ -121,6 +122,39 @@ def _resolve_processing_run_id(task: Any) -> str:
     return str(uuid.uuid4())
 
 
+def _validate_step_amount(lecture: Lecture, *, amount: int, reason: str) -> int:
+    if not isinstance(amount, int):
+        raise ValueError(
+            f"Invalid token amount for lecture={lecture.id} reason={reason}: expected int, got {type(amount).__name__}"
+        )
+    if amount < 0:
+        raise ValueError(
+            f"Invalid token amount for lecture={lecture.id} reason={reason}: {amount}"
+        )
+    return amount
+
+
+def _ensure_tokens_before_step(
+    lecture: Lecture,
+    *,
+    amount: int,
+    reason: str,
+    step_name: str,
+    processing_run_id: str,
+) -> None:
+    required_amount = _validate_step_amount(lecture, amount=amount, reason=reason)
+    if required_amount == 0:
+        return
+    run_scope = (processing_run_id or "").strip() or "manual"
+    has_balance = _run_async(check_balance(lecture.user_id, required_amount))
+    if not has_balance:
+        raise ValueError(
+            "Insufficient token balance for "
+            f"lecture={lecture.id} run={run_scope} step={step_name} reason={reason}: "
+            f"required {required_amount} tokens"
+        )
+
+
 def _charge_tokens_for_step(
     lecture: Lecture,
     *,
@@ -129,17 +163,9 @@ def _charge_tokens_for_step(
     step_name: str,
     processing_run_id: str,
 ) -> None:
-    if not isinstance(amount, int):
-        raise ValueError(
-            f"Invalid token amount for lecture={lecture.id} reason={reason}: expected int, got {type(amount).__name__}"
-        )
-    charge_amount = amount
+    charge_amount = _validate_step_amount(lecture, amount=amount, reason=reason)
     if charge_amount == 0:
         return
-    if charge_amount < 0:
-        raise ValueError(
-            f"Invalid token amount for lecture={lecture.id} reason={reason}: {charge_amount}"
-        )
     run_scope = (processing_run_id or "").strip() or "manual"
     idempotency_key = f"lecture:{lecture.id}:run:{run_scope}:step:{step_name}"
     try:
@@ -1072,6 +1098,23 @@ def transcribe_task(
         processing_run_id = _resolve_processing_run_id(self)
         lecture = _get_lecture_sync(lecture_uuid)
         is_realtime = _is_realtime_lecture(lecture)
+        if is_realtime:
+            # Guard minimum required budget before expensive transcription.
+            _ensure_tokens_before_step(
+                lecture,
+                amount=int(settings.COST_TRANSCRIBE),
+                reason=f"realtime_pipeline lecture:{lecture_uuid}",
+                step_name="realtime_pipeline",
+                processing_run_id=processing_run_id,
+            )
+        else:
+            _ensure_tokens_before_step(
+                lecture,
+                amount=int(settings.COST_TRANSCRIBE),
+                reason=f"transcribe lecture:{lecture_uuid}",
+                step_name="transcribe",
+                processing_run_id=processing_run_id,
+            )
         audio_path = _lecture_dir(lecture_uuid) / "audio.wav"
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -1096,6 +1139,15 @@ def transcribe_task(
                 realtime_billable_amount += int(settings.COST_SUMMARIZE)
                 if enrichment_enabled:
                     realtime_billable_amount += int(settings.COST_ENRICH)
+            # Verify full realtime budget before realtime post-processing branch.
+            realtime_extra_amount = max(0, int(realtime_billable_amount) - int(settings.COST_TRANSCRIBE))
+            _ensure_tokens_before_step(
+                lecture,
+                amount=realtime_extra_amount,
+                reason=f"realtime_pipeline lecture:{lecture_uuid}",
+                step_name="realtime_pipeline",
+                processing_run_id=processing_run_id,
+            )
 
         _run_async(_upsert_transcript_async(lecture_uuid, segments=segments, full_text=full_text))
         _update_lecture_state(
@@ -1189,6 +1241,13 @@ def summary_agent_task(self, lecture_id: str) -> str:
         lecture = _get_lecture_sync(lecture_uuid)
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
+        _ensure_tokens_before_step(
+            lecture,
+            amount=int(settings.COST_SUMMARIZE),
+            reason=f"summarize lecture:{lecture_uuid}",
+            step_name="summary_agent",
+            processing_run_id=processing_run_id,
+        )
 
         transcript_segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
         summary_content = _run_async(_get_summary_content_async(lecture_uuid))
@@ -1259,6 +1318,13 @@ def entity_graph_agent_task(self, lecture_id: str, selected_entities: list[str] 
         lecture = _get_lecture_sync(lecture_uuid)
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
+        _ensure_tokens_before_step(
+            lecture,
+            amount=int(settings.COST_EXTRACT_ENTITIES),
+            reason=f"extract_entities lecture:{lecture_uuid}",
+            step_name="entity_graph_agent",
+            processing_run_id=processing_run_id,
+        )
 
         _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
         if not transcript_full_text:
@@ -1315,6 +1381,13 @@ def enrichment_agent_task(self, lecture_id: str) -> str:
         ]
         if not summary_blocks:
             return str(lecture_uuid)
+        _ensure_tokens_before_step(
+            lecture,
+            amount=int(settings.COST_ENRICH),
+            reason=f"enrich lecture:{lecture_uuid}",
+            step_name="enrichment_agent",
+            processing_run_id=processing_run_id,
+        )
 
         enrichment_payload = run_enrichment_agent(
             lecture_text=transcript_full_text,
@@ -1361,6 +1434,13 @@ def final_summary_agent_task(self, lecture_id: str) -> str:
         lecture = _get_lecture_sync(lecture_uuid)
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
+        _ensure_tokens_before_step(
+            lecture,
+            amount=int(settings.COST_SUMMARIZE),
+            reason=f"final_summary lecture:{lecture_uuid}",
+            step_name="final_summary_agent",
+            processing_run_id=processing_run_id,
+        )
 
         summary_content = _run_async(_get_summary_content_async(lecture_uuid))
         summary_blocks = [
