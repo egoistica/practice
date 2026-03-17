@@ -206,17 +206,6 @@ def _api_get_summary(token: str, lecture_id: str) -> dict[str, Any]:
     return response.json()
 
 
-def _api_get_graph(token: str, lecture_id: str) -> dict[str, Any]:
-    response = requests.get(
-        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/graph",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    if response.status_code >= 400:
-        _raise_api_error(response, context="get_graph")
-    return response.json()
-
-
 def _api_export_markdown(token: str, lecture_id: str) -> bytes:
     response = requests.get(
         f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/export?format=md",
@@ -569,37 +558,6 @@ async def handle_upload_mode(callback: CallbackQuery, state: FSMContext) -> None
         callback.bot,
         task,
         task_key=f"{lecture_id}:{progress_message.message_id}",
-    )
-
-
-@router.callback_query(F.data.startswith("lecture:graph:"))
-async def callback_graph(callback: CallbackQuery) -> None:
-    if callback.from_user is None or callback.message is None or not callback.data:
-        await callback.answer("Ошибка контекста.", show_alert=True)
-        return
-    lecture_id = callback.data.split(":")[-1]
-    await callback.answer()
-
-    try:
-        token = await _authorized_token_for_telegram_user(callback.from_user.id)
-        payload = await asyncio.to_thread(_api_get_graph, token, lecture_id)
-    except Exception as exc:
-        await callback.message.answer(f"Не удалось получить граф: {exc}")
-        return
-
-    nodes = payload.get("nodes") if isinstance(payload, dict) else []
-    edges = payload.get("edges") if isinstance(payload, dict) else []
-    node_count = len(nodes) if isinstance(nodes, list) else 0
-    edge_count = len(edges) if isinstance(edges, list) else 0
-    preview_nodes = []
-    if isinstance(nodes, list):
-        for node in nodes[:5]:
-            if isinstance(node, dict):
-                preview_nodes.append(str(node.get("label", "")).strip())
-
-    preview_text = ", ".join([item for item in preview_nodes if item]) or "нет данных"
-    await callback.message.answer(
-        f"Граф готов.\nУзлов: {node_count}\nСвязей: {edge_count}\nПримеры узлов: {preview_text}"
     )
 
 
