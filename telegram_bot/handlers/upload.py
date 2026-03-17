@@ -578,37 +578,6 @@ async def handle_upload_mode(callback: CallbackQuery, state: FSMContext) -> None
     )
 
 
-@router.callback_query(F.data.startswith("lecture:summary:"))
-async def callback_summary(callback: CallbackQuery) -> None:
-    if callback.from_user is None or callback.message is None or not callback.data:
-        await callback.answer("Ошибка контекста.", show_alert=True)
-        return
-    lecture_id = callback.data.split(":")[-1]
-    await callback.answer()
-
-    try:
-        token = await _authorized_token_for_telegram_user(callback.from_user.id)
-        payload = await asyncio.to_thread(_api_get_summary, token, lecture_id)
-    except Exception as exc:
-        await callback.message.answer(f"Не удалось получить конспект: {exc}")
-        return
-
-    blocks = payload.get("blocks") if isinstance(payload, dict) else []
-    if not isinstance(blocks, list) or not blocks:
-        await callback.message.answer("Конспект пока недоступен.")
-        return
-
-    lines = ["Конспект (первые блоки):"]
-    for block in blocks[:4]:
-        if not isinstance(block, dict):
-            continue
-        title = str(block.get("title", "Блок")).strip()
-        text = str(block.get("text", "")).strip()
-        short_text = text[:240] + ("..." if len(text) > 240 else "")
-        lines.append(f"\n• {title}\n{short_text}")
-    await callback.message.answer("\n".join(lines)[:4000])
-
-
 @router.callback_query(F.data.startswith("lecture:graph:"))
 async def callback_graph(callback: CallbackQuery) -> None:
     if callback.from_user is None or callback.message is None or not callback.data:
