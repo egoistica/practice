@@ -4,9 +4,19 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import (
+    CACHE_TTL_LIST_SECONDS,
+    cache_add_to_index,
+    cache_get_json,
+    cache_invalidate_index,
+    cache_set_json,
+    history_list_cache_index,
+    history_list_cache_key,
+)
 from app.core.dependencies import get_current_user, get_db
 from app.models.history import History
 from app.models.lecture import Lecture
@@ -35,6 +45,14 @@ async def list_history(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> HistoryListResponse:
+    cache_key = history_list_cache_key(user.id, skip, limit, sort_order)
+    cached_payload = await cache_get_json(cache_key)
+    if isinstance(cached_payload, dict):
+        try:
+            return HistoryListResponse.model_validate(cached_payload)
+        except ValidationError:
+            pass
+
     order_clause = History.visited_at.asc() if sort_order == "asc" else History.visited_at.desc()
     rows = (
         await db.execute(
@@ -55,12 +73,15 @@ async def list_history(
             )
         ).scalar_one()
     )
-    return HistoryListResponse(
+    response = HistoryListResponse(
         items=[_to_history_response(history, lecture) for history, lecture in rows],
         total=total,
         skip=skip,
         limit=limit,
     )
+    await cache_set_json(cache_key, response.model_dump(mode="json"), CACHE_TTL_LIST_SECONDS)
+    await cache_add_to_index(history_list_cache_index(user.id), cache_key, CACHE_TTL_LIST_SECONDS)
+    return response
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)
@@ -79,4 +100,5 @@ async def remove_from_history(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History entry not found")
 
     await db.commit()
+    await cache_invalidate_index(history_list_cache_index(user.id))
     return {"status": "deleted", "lecture_id": str(lecture_id)}
