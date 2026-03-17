@@ -7,6 +7,8 @@ import uvicorn
 from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from .api import (
     admin_stats_router,
@@ -21,6 +23,7 @@ from .api import (
 )
 from .core.config import settings
 from .core.dependencies import get_celery_app
+from .core.limiter import limiter, rate_limit_exceeded_handler
 from .services.progress_service import start_progress_listener, stop_progress_listener
 
 
@@ -38,6 +41,9 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

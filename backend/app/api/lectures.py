@@ -6,7 +6,7 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, WebSocket, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, status
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.dependencies import get_current_user, get_db
+from app.core.limiter import limiter
 from app.core.security import decode_token
 from app.models.entity_graph import EntityGraph
 from app.models.favourite import Favourite
@@ -410,7 +411,9 @@ async def parse_create_lecture_request(
 
 
 @router.post("", response_model=LectureResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def create_lecture(
+    request: Request,
     payload: CreateLectureRequest = Depends(parse_create_lecture_request),
     file: UploadFile = File(default=None),
     db: AsyncSession = Depends(get_db),
@@ -523,7 +526,9 @@ async def create_lecture(
 
 
 @router.get("", response_model=LectureListResponse)
+@limiter.limit("10/minute")
 async def list_lectures(
+    request: Request,
     skip: int = 0,
     limit: int = 20,
     sort_order: Literal["asc", "desc"] = "desc",
@@ -561,7 +566,9 @@ async def list_lectures(
 
 
 @router.get("/{lecture_id}", response_model=LectureResponse)
+@limiter.limit("30/minute")
 async def get_lecture(
+    request: Request,
     lecture_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -881,7 +888,9 @@ async def enrich_lecture_graph(
 
 
 @router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)
+@limiter.limit("10/minute")
 async def delete_lecture(
+    request: Request,
     lecture_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
