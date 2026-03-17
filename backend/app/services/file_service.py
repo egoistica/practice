@@ -5,6 +5,7 @@ import shutil
 import stat
 import uuid
 from pathlib import Path
+from typing import Any
 
 import aiofiles
 from fastapi import UploadFile
@@ -18,6 +19,20 @@ ALLOWED_VIDEO_MIME_TYPES = {
 }
 CHUNK_SIZE_BYTES = 1024 * 1024
 MAX_UPLOAD_SIZE_BYTES = 500 * 1024 * 1024
+MAX_FILE_SIZE = MAX_UPLOAD_SIZE_BYTES
+_MIME_TO_ALLOWED_EXTENSIONS = {
+    "video/mp4": {".mp4"},
+    "video/x-msvideo": {".avi"},
+    "video/x-matroska": {".mkv"},
+    "video/quicktime": {".mov"},
+}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _safe_suffix(filename: str | None) -> str:
@@ -33,10 +48,15 @@ def validate_video_file(upload_file: UploadFile) -> str:
         raise ValueError("Unsupported file extension. Allowed: MP4, AVI, MKV, MOV")
 
     content_type = (upload_file.content_type or "").lower()
+    if not content_type:
+        raise ValueError("Missing MIME type for uploaded file")
     if content_type == "application/octet-stream":
         raise ValueError("application/octet-stream uploads are not allowed")
-    if content_type and content_type not in ALLOWED_VIDEO_MIME_TYPES:
+    if content_type not in ALLOWED_VIDEO_MIME_TYPES:
         raise ValueError("Unsupported MIME type for video upload")
+    allowed_suffixes = _MIME_TO_ALLOWED_EXTENSIONS.get(content_type, set())
+    if allowed_suffixes and suffix not in allowed_suffixes:
+        raise ValueError("File extension does not match MIME type")
 
     return suffix
 
@@ -47,6 +67,53 @@ def build_lecture_dir(media_root: str, lecture_id: uuid.UUID) -> Path:
 
 def generate_storage_name(suffix: str) -> str:
     return f"{uuid.uuid4().hex}{suffix}"
+
+
+def _parse_clamav_result(result: Any, scanned_path: Path) -> tuple[bool, str | None]:
+    if not result:
+        return False, None
+
+    # pyclamd usually returns: {"<path>": ("FOUND", "<signature>")}
+    if isinstance(result, dict):
+        entry = result.get(str(scanned_path))
+        if isinstance(entry, tuple) and len(entry) >= 1 and str(entry[0]).upper() == "FOUND":
+            signature = str(entry[1]) if len(entry) > 1 and entry[1] else "unknown-signature"
+            return True, signature
+        # Conservative fallback for unknown dict shape.
+        return True, "unknown-signature"
+
+    return True, "unknown-signature"
+
+
+def _scan_file_with_clamav(path: Path) -> None:
+    if not _env_flag("CLAMAV_SCAN_ENABLED", default=False):
+        return
+
+    try:
+        import pyclamd  # type: ignore[import-not-found]
+    except Exception as exc:
+        raise RuntimeError(
+            "CLAMAV_SCAN_ENABLED is set, but pyclamd is not installed"
+        ) from exc
+
+    socket_path = os.getenv("CLAMAV_SOCKET_PATH", "").strip()
+    host = os.getenv("CLAMAV_HOST", "localhost").strip() or "localhost"
+    port_raw = os.getenv("CLAMAV_PORT", "3310").strip() or "3310"
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise RuntimeError("CLAMAV_PORT must be an integer") from exc
+
+    try:
+        client = pyclamd.ClamdUnixSocket(path=socket_path) if socket_path else pyclamd.ClamdNetworkSocket(host, port)
+        client.ping()
+        result = client.scan_file(str(path))
+    except Exception as exc:
+        raise RuntimeError("Unable to scan uploaded file with ClamAV") from exc
+
+    infected, signature = _parse_clamav_result(result, path)
+    if infected:
+        raise ValueError(f"Uploaded file failed malware scan ({signature})")
 
 
 async def save_uploaded_file(
@@ -75,6 +142,7 @@ async def save_uploaded_file(
                     raise ValueError(f"File is too large. Maximum size is {max_upload_size} bytes")
                 await file_obj.write(chunk)
 
+        _scan_file_with_clamav(temp_destination)
         temp_destination.replace(destination)
         return str(Path(str(lecture_id)) / stored_name)
     except Exception:
