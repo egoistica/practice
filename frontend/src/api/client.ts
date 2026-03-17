@@ -27,3 +27,28 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (axios.isAxiosError(error) && error.response?.status === 429) {
+      const retryAfter = error.response.headers?.["retry-after"];
+      const currentData = error.response.data;
+      const currentDetail =
+        currentData && typeof currentData === "object" && "detail" in currentData
+          ? String((currentData as { detail?: unknown }).detail ?? "").trim()
+          : "";
+
+      let detail = currentDetail || "Слишком много запросов. Повторите попытку позже.";
+      if (retryAfter && /^\d+$/.test(String(retryAfter))) {
+        detail = `${detail} Повторите через ${String(retryAfter)} сек.`;
+      }
+
+      if (!currentData || typeof currentData !== "object") {
+        error.response.data = { detail };
+      } else {
+        (currentData as Record<string, unknown>).detail = detail;
+      }
+    }
+    return Promise.reject(error);
+  },
+);

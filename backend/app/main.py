@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import logging
 import time
+from uuid import UUID
 
 import uvicorn
 from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import select
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from .api import (
     admin_stats_router,
@@ -21,7 +26,12 @@ from .api import (
 )
 from .core.config import settings
 from .core.dependencies import get_celery_app
+from .core.limiter import limiter, rate_limit_exceeded_handler
+from .core.ownership import extract_bearer_token, extract_lecture_id_from_path
+from .core.security import decode_token
+from .models.lecture import Lecture
 from .services.progress_service import start_progress_listener, stop_progress_listener
+from .core.database import AsyncSessionLocal
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +48,8 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
-
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -46,6 +57,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(SlowAPIMiddleware)
     app.include_router(auth_router)
     app.include_router(admin_users_router)
     app.include_router(admin_stats_router)
@@ -75,6 +87,42 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def request_logging_middleware(request: Request, call_next):
         logger.info("%s %s", request.method, request.url.path)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def lecture_ownership_middleware(request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        lecture_id = extract_lecture_id_from_path(request.url.path)
+        if lecture_id is None:
+            return await call_next(request)
+
+        token = extract_bearer_token(request)
+        if not token:
+            return await call_next(request)
+
+        try:
+            payload = decode_token(token)
+            user_id = UUID(str(payload.get("user_id")))
+        except (ValueError, TypeError):
+            # Let auth dependencies return canonical 401 response.
+            return await call_next(request)
+
+        async with AsyncSessionLocal() as db:
+            lecture_owner_id = (
+                await db.execute(
+                    select(Lecture.user_id).where(Lecture.id == lecture_id)
+                )
+            ).scalar_one_or_none()
+
+        # Preserve "not found" behavior for missing lecture.
+        if lecture_owner_id is None:
+            return await call_next(request)
+
+        if lecture_owner_id != user_id:
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+
         return await call_next(request)
 
     @app.get("/")
