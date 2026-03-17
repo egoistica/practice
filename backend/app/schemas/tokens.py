@@ -16,3 +16,10 @@ class TokenTransactionResponse(BaseModel):
 class TokenBalanceResponse(BaseModel):
     balance: int
     transactions: list[TokenTransactionResponse]
+
+
+class TokenHistoryResponse(BaseModel):
+    items: list[TokenTransactionResponse]
+    total: int
+    skip: int
+    limit: int
