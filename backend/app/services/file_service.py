@@ -77,12 +77,22 @@ def _parse_clamav_result(result: Any, scanned_path: Path) -> tuple[bool, str | N
     # pyclamd usually returns: {"<path>": ("FOUND", "<signature>")}
     if isinstance(result, dict):
         entry = result.get(str(scanned_path))
-        if isinstance(entry, tuple) and len(entry) >= 1 and str(entry[0]).upper() == "FOUND":
+        if entry is None:
+            return False, None
+        if not isinstance(entry, tuple) or len(entry) < 1:
+            return True, "clamav-error:invalid-result-shape"
+
+        status = str(entry[0]).upper()
+        if status == "FOUND":
             signature = str(entry[1]) if len(entry) > 1 and entry[1] else "unknown-signature"
             return True, signature
-        return False, None
+        if status == "ERROR":
+            reason = str(entry[1]).strip() if len(entry) > 1 and entry[1] else "unknown"
+            return True, f"clamav-error:{reason}"
 
-    return False, None
+        return True, f"clamav-error:unexpected-status:{status.lower() or 'unknown'}"
+
+    return True, "clamav-error:invalid-result-type"
 
 
 def _scan_file_with_clamav(path: Path) -> None:
@@ -105,7 +115,11 @@ def _scan_file_with_clamav(path: Path) -> None:
         raise RuntimeError("CLAMAV_PORT must be an integer") from exc
 
     try:
-        client = pyclamd.ClamdUnixSocket(path=socket_path) if socket_path else pyclamd.ClamdNetworkSocket(host, port)
+        client = (
+            pyclamd.ClamdUnixSocket(filename=socket_path)
+            if socket_path
+            else pyclamd.ClamdNetworkSocket(host, port)
+        )
         client.ping()
         result = client.scan_file(str(path))
     except Exception as exc:
