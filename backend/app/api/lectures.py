@@ -97,8 +97,8 @@ def _is_terminal_lecture_status(status_value: str | None) -> bool:
 
 
 def _is_non_terminal_lecture_response(item: LectureResponse) -> bool:
-    if not _is_terminal_lecture_status(item.status):
-        return True
+    if _is_terminal_lecture_status(item.status):
+        return False
     return int(item.processing_progress) < 100
 
 
@@ -367,6 +367,19 @@ def _extract_websocket_token(websocket: WebSocket) -> str | None:
             return token
 
     return _normalize_bearer_token(websocket.query_params.get("token"))
+
+
+def _extract_request_token(request: Request) -> str | None:
+    token = request.headers.get("authorization")
+    if token:
+        return token
+
+    for cookie_name in ("access_token", "token", "authorization"):
+        token = request.cookies.get(cookie_name)
+        if token:
+            return token
+
+    return request.query_params.get("token")
 
 
 def _is_websocket_origin_allowed(websocket: WebSocket) -> bool:
@@ -662,7 +675,7 @@ async def get_lecture_progress(
     lecture_id: uuid.UUID,
     stream: bool = Query(default=False),
 ) -> Response | dict[str, Any]:
-    token = _normalize_bearer_token(request.headers.get("authorization"))
+    token = _normalize_bearer_token(_extract_request_token(request))
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 

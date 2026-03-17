@@ -42,8 +42,8 @@ def _to_history_response(history: History, lecture: Lecture) -> HistoryLectureRe
 
 def _is_non_terminal_history_item(item: HistoryLectureResponse) -> bool:
     status_value = str(item.status or "").strip().lower()
-    if status_value not in TERMINAL_HISTORY_STATUSES:
-        return True
+    if status_value in TERMINAL_HISTORY_STATUSES:
+        return False
     return int(item.processing_progress) < 100
 
 
