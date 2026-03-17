@@ -9,7 +9,7 @@ export type TokenTransaction = {
 
 export type TokenBalanceResponse = {
   balance: number;
-  transactions: TokenTransaction[];
+  transactions?: TokenTransaction[] | null;
 };
 
 export type TokenHistoryResponse = {
@@ -34,6 +34,15 @@ export async function fetchTokenBalance(): Promise<TokenBalanceResponse> {
 }
 
 export async function fetchTokenHistoryPage(skip: number, limit: number): Promise<TokenHistoryResponse> {
+  if (!Number.isInteger(skip) || skip < 0) {
+    throw new Error(`Invalid pagination parameter 'skip': expected a non-negative integer, got ${String(skip)}`);
+  }
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new Error(
+      `Invalid pagination parameter 'limit': expected a non-negative integer, got ${String(limit)}`,
+    );
+  }
+
   const response = await apiClient.get<TokenHistoryResponse>("/tokens/history", {
     params: { skip, limit },
   });
