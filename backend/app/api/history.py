@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db
@@ -60,3 +61,30 @@ async def list_history(
         skip=skip,
         limit=limit,
     )
+
+
+@router.delete("/{lecture_id}", status_code=status.HTTP_200_OK)
+async def remove_from_history(
+    lecture_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, str]:
+    history_rows = (
+        await db.execute(
+            select(History).where(
+                History.user_id == user.id,
+                History.lecture_id == lecture_id,
+            )
+        )
+    ).scalars().all()
+    if not history_rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History entry not found")
+
+    await db.execute(
+        delete(History).where(
+            History.user_id == user.id,
+            History.lecture_id == lecture_id,
+        )
+    )
+    await db.commit()
+    return {"status": "deleted", "lecture_id": str(lecture_id)}
