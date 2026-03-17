@@ -19,6 +19,15 @@ export type TokenHistoryResponse = {
   limit: number;
 };
 
+export type TokenOperationCost = {
+  action: string;
+  cost: number;
+};
+
+export type TokenOperationCostsResponse = {
+  items: TokenOperationCost[];
+};
+
 export function tokensBalanceQueryKey(userId: string | undefined) {
   return ["tokens-balance", userId] as const;
 }
@@ -47,4 +56,9 @@ export async function fetchTokenHistoryPage(skip: number, limit: number): Promis
     params: { skip, limit },
   });
   return response.data;
+}
+
+export async function fetchTokenOperationCosts(): Promise<TokenOperationCost[]> {
+  const response = await apiClient.get<TokenOperationCostsResponse>("/tokens/costs");
+  return response.data.items ?? [];
 }

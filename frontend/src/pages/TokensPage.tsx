@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchTokenBalance,
   fetchTokenHistoryPage,
+  fetchTokenOperationCosts,
+  TokenOperationCost,
   TokenTransaction,
   tokensBalanceQueryKey,
 } from "../api/tokens";
@@ -17,7 +19,7 @@ type TokenHistoryRow = TokenTransaction & {
 
 const PAGE_LIMIT = 50;
 
-const OPERATION_COSTS = [
+const DEFAULT_OPERATION_COSTS: TokenOperationCost[] = [
   { action: "Транскрибация", cost: 50 },
   { action: "Суммаризация", cost: 30 },
   { action: "Извлечение сущностей", cost: 40 },
@@ -49,6 +51,12 @@ export default function TokensPage() {
     queryKey: ["tokens-history-page", userId],
     enabled: Boolean(userId),
     queryFn: async () => fetchTokenHistoryPage(0, PAGE_LIMIT),
+  });
+
+  const operationCostsQuery = useQuery({
+    queryKey: ["tokens-operation-costs"],
+    enabled: Boolean(userId),
+    queryFn: fetchTokenOperationCosts,
   });
 
   useEffect(() => {
@@ -130,6 +138,13 @@ export default function TokensPage() {
 
       <section style={{ display: "grid", gap: "0.5rem" }}>
         <h3 style={{ margin: 0 }}>Стоимость операций</h3>
+        {operationCostsQuery.isLoading ? <p>Загрузка стоимости операций...</p> : null}
+        {operationCostsQuery.isError ? (
+          <p role="alert" style={{ color: "#b00020", margin: 0 }}>
+            {extractErrorMessage(operationCostsQuery.error, "Не удалось загрузить стоимость операций.")}
+            {" Используются значения по умолчанию."}
+          </p>
+        ) : null}
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr>
@@ -138,7 +153,7 @@ export default function TokensPage() {
             </tr>
           </thead>
           <tbody>
-            {OPERATION_COSTS.map((item) => (
+            {(operationCostsQuery.data?.length ? operationCostsQuery.data : DEFAULT_OPERATION_COSTS).map((item) => (
               <tr key={item.action}>
                 <td>{item.action}</td>
                 <td align="right">{item.cost}</td>

@@ -35,6 +35,7 @@ class CeleryConfig:
     result_serializer: str = "json"
     accept_content: tuple[str, ...] = ("json",)
     enable_utc: bool = True
+    worker_prefetch_multiplier: int = 1
     include: tuple[str, ...] = ("celery_app",)
 
     @classmethod
@@ -54,4 +55,5 @@ class CeleryConfig:
             "result_serializer": self.result_serializer,
             "timezone": self.timezone,
             "enable_utc": self.enable_utc,
+            "worker_prefetch_multiplier": self.worker_prefetch_multiplier,
         }

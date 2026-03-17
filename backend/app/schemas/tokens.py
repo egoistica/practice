@@ -23,3 +23,12 @@ class TokenHistoryResponse(BaseModel):
     total: int
     skip: int
     limit: int
+
+
+class TokenOperationCostItem(BaseModel):
+    action: str
+    cost: int
+
+
+class TokenOperationCostsResponse(BaseModel):
+    items: list[TokenOperationCostItem]

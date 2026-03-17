@@ -4,10 +4,17 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import get_current_user, get_db
 from app.models.token_transaction import TokenTransaction
 from app.models.user import User
-from app.schemas.tokens import TokenBalanceResponse, TokenHistoryResponse, TokenTransactionResponse
+from app.schemas.tokens import (
+    TokenBalanceResponse,
+    TokenHistoryResponse,
+    TokenOperationCostItem,
+    TokenOperationCostsResponse,
+    TokenTransactionResponse,
+)
 
 router = APIRouter(prefix="/tokens", tags=["tokens"])
 
@@ -84,4 +91,19 @@ async def get_tokens_history(
         total=total,
         skip=skip,
         limit=limit,
+    )
+
+
+@router.get("/costs", response_model=TokenOperationCostsResponse)
+async def get_operation_costs(
+    user: User = Depends(get_current_user),
+) -> TokenOperationCostsResponse:
+    _ = user
+    return TokenOperationCostsResponse(
+        items=[
+            TokenOperationCostItem(action="Транскрибация", cost=settings.COST_TRANSCRIBE),
+            TokenOperationCostItem(action="Суммаризация", cost=settings.COST_SUMMARIZE),
+            TokenOperationCostItem(action="Извлечение сущностей", cost=settings.COST_EXTRACT_ENTITIES),
+            TokenOperationCostItem(action="Обогащение", cost=settings.COST_ENRICH),
+        ]
     )
