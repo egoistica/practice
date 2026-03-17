@@ -7,6 +7,38 @@ x-app-database-env: &app-database-env
   <<: *postgres-credentials
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_password}@postgres:5432/${POSTGRES_DB:-app_db}
 
+x-celery-worker-base: &celery-worker-base
+  build:
+    context: ./backend
+    dockerfile: Dockerfile.worker
+  restart: unless-stopped
+  working_dir: /backend
+  environment:
+    <<: *app-database-env
+    PYTHONPATH: /backend
+    REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
+    YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
+    YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
+    LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
+    LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    OLLAMA_FALLBACK_MODELS: ${OLLAMA_FALLBACK_MODELS:-}
+    MEDIA_ROOT: ${MEDIA_ROOT:-/media}
+    YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
+    YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
+    YTDLP_REMOTE_COMPONENTS: ${YTDLP_REMOTE_COMPONENTS:-ejs:github,ejs:npm}
+  volumes:
+    - ./backend:/backend
+    - ./media:/media
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16
@@ -76,71 +108,13 @@ services:
         condition: service_healthy
 
   celery_worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.worker
-    restart: unless-stopped
-    working_dir: /
-    environment:
-      <<: *app-database-env
-      PYTHONPATH: /backend
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
-      YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
-      YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
-      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
-      LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_FALLBACK_MODELS: ${OLLAMA_FALLBACK_MODELS:-}
-      MEDIA_ROOT: ${MEDIA_ROOT:-/media}
-      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
-      YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
-      YTDLP_REMOTE_COMPONENTS: ${YTDLP_REMOTE_COMPONENTS:-ejs:github,ejs:npm}
-    command: celery -A backend.celery_app worker --loglevel=info --concurrency=4
-    volumes:
-      - ./backend:/backend
-      - ./media:/media
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    <<: *celery-worker-base
+    command: celery -A celery_app.celery_app worker --loglevel=info --concurrency=4
 
   celery_worker_2:
+    <<: *celery-worker-base
     profiles: ["multiworker"]
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.worker
-    restart: unless-stopped
-    working_dir: /
-    environment:
-      <<: *app-database-env
-      PYTHONPATH: /backend
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_secret}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      YANDEXGPT_API_KEY: ${YANDEXGPT_API_KEY:-}
-      YANDEXGPT_FOLDER_ID: ${YANDEXGPT_FOLDER_ID:-}
-      YANDEXGPT_API_BASE: ${YANDEXGPT_API_BASE:-https://ai.api.cloud.yandex.net/v1}
-      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
-      LLM_MODEL: ${LLM_MODEL:-yandexgpt-lite/latest}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_FALLBACK_MODELS: ${OLLAMA_FALLBACK_MODELS:-}
-      MEDIA_ROOT: ${MEDIA_ROOT:-/media}
-      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-}
-      YTDLP_JS_RUNTIMES: ${YTDLP_JS_RUNTIMES:-node}
-      YTDLP_REMOTE_COMPONENTS: ${YTDLP_REMOTE_COMPONENTS:-ejs:github,ejs:npm}
-    command: celery -A backend.celery_app worker --loglevel=info --concurrency=4
-    volumes:
-      - ./backend:/backend
-      - ./media:/media
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    command: celery -A celery_app.celery_app worker --loglevel=info --concurrency=4
 
   frontend:
     build:

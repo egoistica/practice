@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV HOME=/home/appuser
 
-WORKDIR /app
+WORKDIR /backend
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -28,7 +28,7 @@ COPY . .
 
 RUN groupadd --system appuser \
     && useradd --system --gid appuser --create-home --home-dir /home/appuser appuser \
-    && chown -R appuser:appuser /app /home/appuser
+    && chown -R appuser:appuser /backend /home/appuser
 
 USER appuser
 
