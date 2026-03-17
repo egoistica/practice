@@ -97,9 +97,7 @@ def _is_terminal_lecture_status(status_value: str | None) -> bool:
 
 
 def _is_non_terminal_lecture_response(item: LectureResponse) -> bool:
-    if _is_terminal_lecture_status(item.status):
-        return False
-    return int(item.processing_progress) < 100
+    return not _is_terminal_lecture_status(item.status)
 
 
 def _to_lecture_response(lecture: Lecture) -> LectureResponse:
@@ -709,7 +707,17 @@ async def get_lecture_progress(
         redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
         pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
         try:
-            await pubsub.subscribe(PROGRESS_CHANNEL)
+            try:
+                await pubsub.subscribe(PROGRESS_CHANNEL)
+            except RedisError:
+                logger.exception("SSE progress redis subscribe failed lecture_id=%s", lecture_id)
+                payload = {
+                    "lecture_id": str(lecture_id),
+                    "status": "error",
+                    "detail": "Progress stream unavailable",
+                }
+                yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                return
 
             async with AsyncSessionLocal() as db_after_subscribe:
                 current_lecture = await db_after_subscribe.get(Lecture, lecture_id)
