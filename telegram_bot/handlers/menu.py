@@ -65,13 +65,6 @@ async def _require_authorized_or_start_auth(
         return False
 
 
-async def _send_section(message: Message, title: str, details: str) -> None:
-    await message.answer(
-        f"{title}\n{details}",
-        reply_markup=MENU_INLINE_KEYBOARD,
-    )
-
-
 async def _require_authorized_callback(callback: CallbackQuery) -> bool:
     if callback.from_user is None:
         await callback.answer("Доступ запрещен.", show_alert=True)
@@ -107,29 +100,9 @@ async def handle_help(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(F.text == "💰 Мой баланс")
-async def handle_balance(message: Message, state: FSMContext) -> None:
-    if not await _require_authorized_or_start_auth(message, state):
-        return
-    await _send_section(
-        message,
-        "💰 Мой баланс",
-        "Баланс токенов будет показан после подключения эндпоинта баланса.",
-    )
-
-
 @router.message(F.text == "❓ Помощь")
 async def handle_help_button(message: Message, state: FSMContext) -> None:
     await handle_help(message, state)
-
-
-@router.callback_query(F.data == "menu:balance")
-async def callback_balance(callback: CallbackQuery) -> None:
-    if not await _require_authorized_callback(callback):
-        return
-    if callback.message:
-        await callback.message.answer("💰 Раздел баланса открыт.")
-    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:help")
