@@ -107,28 +107,6 @@ async def handle_help(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(F.text == "📖 История")
-async def handle_history(message: Message, state: FSMContext) -> None:
-    if not await _require_authorized_or_start_auth(message, state):
-        return
-    await _send_section(
-        message,
-        "📖 История",
-        "Здесь будет история ваших лекций. Команда уже подключена к меню.",
-    )
-
-
-@router.message(F.text == "⭐ Избранное")
-async def handle_favourites(message: Message, state: FSMContext) -> None:
-    if not await _require_authorized_or_start_auth(message, state):
-        return
-    await _send_section(
-        message,
-        "⭐ Избранное",
-        "Здесь будут лекции, добавленные в избранное.",
-    )
-
-
 @router.message(F.text == "💰 Мой баланс")
 async def handle_balance(message: Message, state: FSMContext) -> None:
     if not await _require_authorized_or_start_auth(message, state):
@@ -143,24 +121,6 @@ async def handle_balance(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "❓ Помощь")
 async def handle_help_button(message: Message, state: FSMContext) -> None:
     await handle_help(message, state)
-
-
-@router.callback_query(F.data == "menu:history")
-async def callback_history(callback: CallbackQuery) -> None:
-    if not await _require_authorized_callback(callback):
-        return
-    if callback.message:
-        await callback.message.answer("📖 Раздел истории открыт.")
-    await callback.answer()
-
-
-@router.callback_query(F.data == "menu:favourites")
-async def callback_favourites(callback: CallbackQuery) -> None:
-    if not await _require_authorized_callback(callback):
-        return
-    if callback.message:
-        await callback.message.answer("⭐ Раздел избранного открыт.")
-    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:balance")
