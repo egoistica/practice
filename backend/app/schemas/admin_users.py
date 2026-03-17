@@ -34,6 +34,8 @@ class AdminCreateUserRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_password_source(self) -> "AdminCreateUserRequest":
+        if self.generate_password and self.password:
+            raise ValueError("Provide either password or set generate_password=true, not both")
         if not self.generate_password and not self.password:
             raise ValueError("Either password must be provided or generate_password must be true")
         return self
