@@ -24,6 +24,10 @@ router = Router(name="balance")
 REQUEST_TIMEOUT_SECONDS = 40
 
 
+class BotAPIError(RuntimeError):
+    pass
+
+
 def _api_get_balance(token: str) -> dict[str, Any]:
     response = requests.get(
         f"{get_api_base_url().rstrip('/')}/tokens/balance",
@@ -31,8 +35,13 @@ def _api_get_balance(token: str) -> dict[str, Any]:
         params={"include_transactions": "true", "transactions_limit": 5},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
-    if response.status_code >= 400:
+    if response.status_code in (401, 403):
         raise BotAuthError(f"Failed to load balance (HTTP {response.status_code})")
+    if response.status_code >= 400:
+        body = response.text.strip() or "<empty>"
+        raise BotAPIError(
+            f"Failed to load balance (HTTP {response.status_code}): {body}"
+        )
     return response.json()
 
 
@@ -104,6 +113,10 @@ async def handle_balance(message: Message, state: FSMContext) -> None:
         return
     try:
         await _send_balance(message, token=token)
+    except BotAuthError:
+        await request_auth_method(message, state, telegram_id=message.from_user.id)
+    except BotAPIError:
+        await message.answer("Сервис баланса временно недоступен. Попробуйте позже.")
     except Exception:
         await message.answer("Не удалось получить баланс. Попробуйте позже.")
 
@@ -111,6 +124,9 @@ async def handle_balance(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "menu:balance")
 async def callback_balance(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.from_user is None or callback.message is None:
+        await callback.answer("Ошибка контекста.", show_alert=True)
+        return
+    if not isinstance(callback.message, Message):
         await callback.answer("Ошибка контекста.", show_alert=True)
         return
     token = await _authorized_token_or_start_auth(
@@ -124,5 +140,13 @@ async def callback_balance(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     try:
         await _send_balance(callback.message, token=token)
+    except BotAuthError:
+        await request_auth_method(
+            callback.message,
+            state,
+            telegram_id=callback.from_user.id,
+        )
+    except BotAPIError:
+        await callback.message.answer("Сервис баланса временно недоступен. Попробуйте позже.")
     except Exception:
         await callback.message.answer("Не удалось получить баланс. Попробуйте позже.")
