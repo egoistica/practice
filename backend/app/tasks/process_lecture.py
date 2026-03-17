@@ -110,12 +110,34 @@ def _get_lecture_sync(lecture_uuid: uuid.UUID) -> Lecture:
     return _run_async(_get_lecture_async(lecture_uuid))
 
 
-def _charge_tokens_before_task(lecture: Lecture, *, amount: int, reason: str) -> None:
-    charge_amount = max(0, int(amount))
+def _charge_tokens_before_task(
+    lecture: Lecture,
+    *,
+    amount: int,
+    reason: str,
+    step_name: str,
+) -> None:
+    if not isinstance(amount, int):
+        raise ValueError(
+            f"Invalid token amount for lecture={lecture.id} reason={reason}: expected int, got {type(amount).__name__}"
+        )
+    charge_amount = amount
     if charge_amount == 0:
         return
+    if charge_amount < 0:
+        raise ValueError(
+            f"Invalid token amount for lecture={lecture.id} reason={reason}: {charge_amount}"
+        )
+    idempotency_key = f"lecture:{lecture.id}:step:{step_name}"
     try:
-        _run_async(deduct_tokens(lecture.user_id, charge_amount, reason))
+        _run_async(
+            deduct_tokens(
+                lecture.user_id,
+                charge_amount,
+                reason,
+                idempotency_key=idempotency_key,
+            )
+        )
     except InsufficientTokenBalanceError as exc:
         raise ValueError(
             f"Insufficient token balance for {reason}: required {charge_amount} tokens"
@@ -1041,6 +1063,7 @@ def transcribe_task(
                 lecture,
                 amount=settings.COST_TRANSCRIBE,
                 reason=f"transcribe lecture:{lecture_uuid}",
+                step_name="transcribe",
             )
         audio_path = _lecture_dir(lecture_uuid) / "audio.wav"
         if not audio_path.exists():
@@ -1051,14 +1074,6 @@ def transcribe_task(
         full_text = str(transcription.get("full_text", "")).strip()
         if not full_text:
             raise ValueError("Transcription returned empty text")
-
-        _run_async(_upsert_transcript_async(lecture_uuid, segments=segments, full_text=full_text))
-        _update_lecture_state(
-            lecture_uuid,
-            status=LectureStatus.PROCESSING,
-            progress=50,
-            publish_progress=True,
-        )
 
         if is_realtime:
             has_realtime_timestamps = _has_usable_realtime_timestamps(segments)
@@ -1072,8 +1087,18 @@ def transcribe_task(
                 lecture,
                 amount=realtime_billable_amount,
                 reason=f"realtime_pipeline lecture:{lecture_uuid}",
+                step_name="realtime_pipeline",
             )
 
+        _run_async(_upsert_transcript_async(lecture_uuid, segments=segments, full_text=full_text))
+        _update_lecture_state(
+            lecture_uuid,
+            status=LectureStatus.PROCESSING,
+            progress=50,
+            publish_progress=True,
+        )
+
+        if is_realtime:
             if has_realtime_timestamps:
                 _run_realtime_enrichment(
                     lecture_uuid,
@@ -1145,6 +1170,7 @@ def summary_agent_task(self, lecture_id: str) -> str:
             lecture,
             amount=settings.COST_SUMMARIZE,
             reason=f"summarize lecture:{lecture_uuid}",
+            step_name="summary_agent",
         )
 
         transcript_segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
@@ -1212,6 +1238,7 @@ def entity_graph_agent_task(self, lecture_id: str, selected_entities: list[str] 
             lecture,
             amount=settings.COST_EXTRACT_ENTITIES,
             reason=f"extract_entities lecture:{lecture_uuid}",
+            step_name="entity_graph_agent",
         )
 
         _segments, transcript_full_text = _run_async(_get_transcript_async(lecture_uuid))
@@ -1265,6 +1292,7 @@ def enrichment_agent_task(self, lecture_id: str) -> str:
             lecture,
             amount=settings.COST_ENRICH,
             reason=f"enrich lecture:{lecture_uuid}",
+            step_name="enrichment_agent",
         )
 
         enrichment_payload = run_enrichment_agent(
@@ -1308,6 +1336,7 @@ def final_summary_agent_task(self, lecture_id: str) -> str:
             lecture,
             amount=settings.COST_SUMMARIZE,
             reason=f"final_summary lecture:{lecture_uuid}",
+            step_name="final_summary_agent",
         )
 
         summary_content = _run_async(_get_summary_content_async(lecture_uuid))
