@@ -1320,6 +1320,11 @@ def final_summary_agent_task(self, lecture_id: str) -> str:
         lecture = _get_lecture_sync(lecture_uuid)
         if _is_realtime_lecture(lecture):
             return str(lecture_uuid)
+        _check_tokens_before_task(
+            lecture,
+            amount=settings.COST_SUMMARIZE,
+            step="final summary",
+        )
 
         summary_content = _run_async(_get_summary_content_async(lecture_uuid))
         summary_blocks = [
@@ -1348,6 +1353,11 @@ def final_summary_agent_task(self, lecture_id: str) -> str:
                 timecode_start=summary_start,
                 timecode_end=summary_end,
             )
+        )
+        _deduct_tokens_after_task(
+            lecture,
+            amount=settings.COST_SUMMARIZE,
+            reason=f"final_summary lecture:{lecture_uuid}",
         )
         _update_lecture_state(
             lecture_uuid,
