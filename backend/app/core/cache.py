@@ -95,6 +95,10 @@ async def _get_index_version(index_key: str) -> int:
     return max(1, version)
 
 
+async def cache_get_index_version(index_key: str) -> int:
+    return await _get_index_version(index_key)
+
+
 async def cache_get_json(key: str, *, index_key: str | None = None) -> Any | None:
     concrete_key = key
     if index_key:
@@ -123,10 +127,20 @@ async def cache_set_json(
     ttl_seconds: int,
     *,
     index_key: str | None = None,
+    expected_version: int | None = None,
 ) -> None:
     concrete_key = key
     if index_key:
         version = await _get_index_version(index_key)
+        if expected_version is not None and int(expected_version) != version:
+            logger.debug(
+                "Skip cache write due to version mismatch for index=%s key=%s expected=%s actual=%s",
+                index_key,
+                key,
+                expected_version,
+                version,
+            )
+            return
         concrete_key = _versioned_cache_key(key, version)
 
     payload = json.dumps(jsonable_encoder(value), ensure_ascii=False, separators=(",", ":"))
@@ -137,10 +151,25 @@ async def cache_set_json(
         logger.exception("Redis cache write failed for key=%s", concrete_key)
 
 
-async def cache_add_to_index(index_key: str, cache_key: str, ttl_seconds: int) -> None:
+async def cache_add_to_index(
+    index_key: str,
+    cache_key: str,
+    ttl_seconds: int,
+    *,
+    expected_version: int | None = None,
+) -> None:
     try:
         client = await _get_redis_client()
         version = await _get_index_version(index_key)
+        if expected_version is not None and int(expected_version) != version:
+            logger.debug(
+                "Skip cache index add due to version mismatch for index=%s key=%s expected=%s actual=%s",
+                index_key,
+                cache_key,
+                expected_version,
+                version,
+            )
+            return
         members_key = _index_members_key(index_key, version)
         concrete_cache_key = _versioned_cache_key(cache_key, version)
         await client.sadd(members_key, concrete_cache_key)
