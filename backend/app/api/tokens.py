@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db
 from app.models.token_transaction import TokenTransaction
 from app.models.user import User
-from app.schemas.tokens import TokenBalanceResponse, TokenTransactionResponse
+from app.schemas.tokens import TokenBalanceResponse, TokenHistoryResponse, TokenTransactionResponse
 
 router = APIRouter(prefix="/tokens", tags=["tokens"])
 
@@ -42,4 +42,46 @@ async def get_tokens_balance(
     return TokenBalanceResponse(
         balance=user.token_balance,
         transactions=transactions,
+    )
+
+
+@router.get("/history", response_model=TokenHistoryResponse)
+async def get_tokens_history(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> TokenHistoryResponse:
+    rows = (
+        await db.execute(
+            select(TokenTransaction)
+            .where(TokenTransaction.user_id == user.id)
+            .order_by(TokenTransaction.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+    ).scalars().all()
+    total = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(TokenTransaction)
+                .where(TokenTransaction.user_id == user.id)
+            )
+        ).scalar_one()
+    )
+    items = [
+        TokenTransactionResponse(
+            id=item.id,
+            amount=item.amount,
+            reason=item.reason,
+            created_at=item.created_at,
+        )
+        for item in rows
+    ]
+    return TokenHistoryResponse(
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
     )

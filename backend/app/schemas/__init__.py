@@ -19,7 +19,7 @@ from .engagement import (
 from .graph import Edge, GraphResponse, Mention, Node
 from .lecture import CreateLectureRequest, LLMRequestConfig, LectureListResponse, LectureResponse
 from .summary import SummaryBlock, SummaryResponse, TranscriptResponse, TranscriptSegment
-from .tokens import TokenBalanceResponse, TokenTransactionResponse
+from .tokens import TokenBalanceResponse, TokenHistoryResponse, TokenTransactionResponse
 
 __all__ = [
     "AdminAddTokensRequest",
@@ -48,6 +48,7 @@ __all__ = [
     "SummaryResponse",
     "TokenResponse",
     "TokenBalanceResponse",
+    "TokenHistoryResponse",
     "TokenTransactionResponse",
     "TranscriptResponse",
     "TranscriptSegment",
