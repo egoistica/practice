@@ -6,10 +6,12 @@ import logging
 import uuid
 from typing import Any, Literal
 
+import redis.asyncio as redis
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, status
 from fastapi.responses import Response, StreamingResponse
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +57,7 @@ from app.services.file_service import delete_lecture_media, save_uploaded_file
 from app.services.history_service import record_history_visit
 from app.services.llm_service import LLMServiceError, enrich_graph, merge_graph_data, summarize_segment
 from app.services.progress_service import (
+    PROGRESS_CHANNEL,
     broadcast_progress,
     register_subscription,
     unregister_subscription,
@@ -69,6 +72,8 @@ SUMMARY_ENRICH_PROMPT = (
     "Расширь существующий конспект лекции: добавь полезные детали, примеры и уточнения. "
     "Не дублируй уже имеющиеся блоки и верни только JSON формата blocks."
 )
+TERMINAL_LECTURE_STATUSES = {"done", "error"}
+SHORT_LIVED_NON_TERMINAL_CACHE_TTL_SECONDS = 10
 
 
 async def _invalidate_lecture_list_cache(user_id: uuid.UUID) -> None:
@@ -85,6 +90,16 @@ async def _invalidate_summary_cache(lecture_id: uuid.UUID) -> None:
 
 async def _invalidate_graph_cache(lecture_id: uuid.UUID) -> None:
     await cache_invalidate_index(graph_cache_index(lecture_id))
+
+
+def _is_terminal_lecture_status(status_value: str | None) -> bool:
+    return str(status_value or "").strip().lower() in TERMINAL_LECTURE_STATUSES
+
+
+def _is_non_terminal_lecture_response(item: LectureResponse) -> bool:
+    if not _is_terminal_lecture_status(item.status):
+        return True
+    return int(item.processing_progress) < 100
 
 
 def _to_lecture_response(lecture: Lecture) -> LectureResponse:
@@ -587,11 +602,14 @@ async def list_lectures(
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="limit must be between 1 and 100")
 
+    list_index_key = lecture_list_cache_index(user.id)
     cache_key = lecture_list_cache_key(user.id, skip, limit, sort_order)
-    cached_payload = await cache_get_json(cache_key)
+    cached_payload = await cache_get_json(cache_key, index_key=list_index_key)
     if isinstance(cached_payload, dict):
         try:
-            return LectureListResponse.model_validate(cached_payload)
+            cached_response = LectureListResponse.model_validate(cached_payload)
+            if not any(_is_non_terminal_lecture_response(item) for item in cached_response.items):
+                return cached_response
         except ValidationError:
             logger.warning("Invalid cached lecture list payload for key=%s", cache_key)
 
@@ -618,8 +636,15 @@ async def list_lectures(
         skip=skip,
         limit=limit,
     )
-    await cache_set_json(cache_key, response.model_dump(mode="json"), CACHE_TTL_LIST_SECONDS)
-    await cache_add_to_index(lecture_list_cache_index(user.id), cache_key, CACHE_TTL_LIST_SECONDS)
+    has_non_terminal = any(_is_non_terminal_lecture_response(item) for item in response.items)
+    cache_ttl = SHORT_LIVED_NON_TERMINAL_CACHE_TTL_SECONDS if has_non_terminal else CACHE_TTL_LIST_SECONDS
+    await cache_set_json(
+        cache_key,
+        response.model_dump(mode="json"),
+        cache_ttl,
+        index_key=list_index_key,
+    )
+    await cache_add_to_index(list_index_key, cache_key, cache_ttl)
     return response
 
 
@@ -629,10 +654,23 @@ async def get_lecture_progress(
     request: Request,
     lecture_id: uuid.UUID,
     stream: bool = Query(default=False),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
 ) -> Response | dict[str, Any]:
-    lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    token = _normalize_bearer_token(request.headers.get("authorization"))
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        token_payload = decode_token(token)
+        user_id = uuid.UUID(str(token_payload.get("user_id")))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from None
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, user_id)
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+        lecture = await _get_owned_lecture(db, lecture_id, user.id)
+
     initial_payload = _lecture_progress_payload(lecture.id, lecture.processing_progress, lecture.status)
 
     if not stream:
@@ -647,48 +685,71 @@ async def get_lecture_progress(
         if last_status in terminal_statuses:
             return
 
-        while True:
-            if await request.is_disconnected():
-                return
+        redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
+        try:
+            await pubsub.subscribe(PROGRESS_CHANNEL)
+            while True:
+                if await request.is_disconnected():
+                    return
 
-            await asyncio.sleep(1)
+                try:
+                    message = await pubsub.get_message(timeout=1.0)
+                except RedisError:
+                    logger.exception("SSE progress redis read failed lecture_id=%s", lecture_id)
+                    payload = {
+                        "lecture_id": str(lecture_id),
+                        "status": "error",
+                        "detail": "Progress stream unavailable",
+                    }
+                    yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
 
-            async with AsyncSessionLocal() as session:
-                current = await session.get(Lecture, lecture_id)
+                if not message:
+                    await asyncio.sleep(0.05)
+                    continue
 
-            if current is None:
-                payload = {
-                    "lecture_id": str(lecture_id),
-                    "status": "error",
-                    "detail": "Lecture not found",
-                }
-                yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                return
+                try:
+                    if not isinstance(message, dict):
+                        continue
+                    raw_data = message.get("data")
+                    if not raw_data:
+                        continue
+                    if isinstance(raw_data, bytes):
+                        raw_data = raw_data.decode("utf-8", errors="ignore")
+                    payload = json.loads(raw_data)
+                    if not isinstance(payload, dict):
+                        continue
+                    if str(payload.get("lecture_id", "")).strip() != str(lecture_id):
+                        continue
 
-            if current.user_id != user.id:
-                payload = {
-                    "lecture_id": str(lecture_id),
-                    "status": "error",
-                    "detail": "Forbidden",
-                }
-                yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                return
+                    current_payload = _lecture_progress_payload(
+                        lecture_id=lecture_id,
+                        progress=payload.get("progress", payload.get("processing_progress", last_progress)),
+                        status_value=payload.get("status", last_status),
+                    )
+                    current_progress = current_payload["processing_progress"]
+                    current_status = current_payload["status"]
+                except Exception:
+                    logger.exception("Failed to parse SSE progress payload lecture_id=%s", lecture_id)
+                    continue
 
-            current_payload = _lecture_progress_payload(
-                current.id,
-                current.processing_progress,
-                current.status,
-            )
-            current_progress = current_payload["processing_progress"]
-            current_status = current_payload["status"]
+                if current_progress != last_progress or current_status != last_status:
+                    yield f"event: progress\ndata: {json.dumps(current_payload, ensure_ascii=False)}\n\n"
+                    last_progress = current_progress
+                    last_status = current_status
 
-            if current_progress != last_progress or current_status != last_status:
-                yield f"event: progress\ndata: {json.dumps(current_payload, ensure_ascii=False)}\n\n"
-                last_progress = current_progress
-                last_status = current_status
-
-            if current_status in terminal_statuses:
-                return
+                if current_status in terminal_statuses:
+                    return
+        finally:
+            close_pubsub = getattr(pubsub, "aclose", None) or pubsub.close
+            close_client = getattr(redis_client, "aclose", None) or redis_client.close
+            close_pubsub_result = close_pubsub()
+            if asyncio.iscoroutine(close_pubsub_result):
+                await close_pubsub_result
+            close_client_result = close_client()
+            if asyncio.iscoroutine(close_client_result):
+                await close_client_result
 
     return StreamingResponse(
         sse_event_stream(),
@@ -734,8 +795,9 @@ async def get_lecture_summary(
     user: User = Depends(get_current_user),
 ) -> SummaryResponse:
     lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    summary_index_key = summary_cache_index(lecture.id)
     cache_key = summary_cache_key(user.id, lecture.id, lecture.updated_at)
-    cached_payload = await cache_get_json(cache_key)
+    cached_payload = await cache_get_json(cache_key, index_key=summary_index_key)
     if isinstance(cached_payload, dict):
         try:
             return SummaryResponse.model_validate(cached_payload)
@@ -748,8 +810,13 @@ async def get_lecture_summary(
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Summary not found")
     response = _to_summary_response(summary)
-    await cache_set_json(cache_key, response.model_dump(mode="json"), CACHE_TTL_ONE_DAY_SECONDS)
-    await cache_add_to_index(summary_cache_index(lecture.id), cache_key, CACHE_TTL_ONE_DAY_SECONDS)
+    await cache_set_json(
+        cache_key,
+        response.model_dump(mode="json"),
+        CACHE_TTL_ONE_DAY_SECONDS,
+        index_key=summary_index_key,
+    )
+    await cache_add_to_index(summary_index_key, cache_key, CACHE_TTL_ONE_DAY_SECONDS)
     return response
 
 
@@ -937,8 +1004,9 @@ async def get_lecture_graph(
     user: User = Depends(get_current_user),
 ) -> GraphResponse:
     lecture = await _get_owned_lecture(db, lecture_id, user.id)
+    graph_index_key = graph_cache_index(lecture.id)
     cache_key = graph_cache_key(user.id, lecture.id, lecture.updated_at)
-    cached_payload = await cache_get_json(cache_key)
+    cached_payload = await cache_get_json(cache_key, index_key=graph_index_key)
     if isinstance(cached_payload, dict):
         try:
             return GraphResponse.model_validate(cached_payload)
@@ -953,8 +1021,13 @@ async def get_lecture_graph(
     if graph is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity graph not found")
     response = _to_graph_response(graph)
-    await cache_set_json(cache_key, response.model_dump(mode="json"), CACHE_TTL_ONE_DAY_SECONDS)
-    await cache_add_to_index(graph_cache_index(lecture.id), cache_key, CACHE_TTL_ONE_DAY_SECONDS)
+    await cache_set_json(
+        cache_key,
+        response.model_dump(mode="json"),
+        CACHE_TTL_ONE_DAY_SECONDS,
+        index_key=graph_index_key,
+    )
+    await cache_add_to_index(graph_index_key, cache_key, CACHE_TTL_ONE_DAY_SECONDS)
     return response
 
 

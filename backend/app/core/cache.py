@@ -70,12 +70,42 @@ def graph_cache_index(lecture_id: UUID) -> str:
     return f"cache:index:graph:lecture:{lecture_id}"
 
 
-async def cache_get_json(key: str) -> Any | None:
+def _index_version_key(index_key: str) -> str:
+    return f"{index_key}:version"
+
+
+def _index_members_key(index_key: str, version: int) -> str:
+    return f"{index_key}:members:v{version}"
+
+
+def _versioned_cache_key(key: str, version: int) -> str:
+    return f"{key}:v{version}"
+
+
+async def _get_index_version(index_key: str) -> int:
+    client = await _get_redis_client()
+    version_key = _index_version_key(index_key)
+    try:
+        await client.setnx(version_key, "1")
+        raw = await client.get(version_key)
+        version = int(str(raw or "1"))
+    except Exception:
+        logger.exception("Redis cache version read failed for index=%s", index_key)
+        return 1
+    return max(1, version)
+
+
+async def cache_get_json(key: str, *, index_key: str | None = None) -> Any | None:
+    concrete_key = key
+    if index_key:
+        version = await _get_index_version(index_key)
+        concrete_key = _versioned_cache_key(key, version)
+
     try:
         client = await _get_redis_client()
-        raw = await client.get(key)
+        raw = await client.get(concrete_key)
     except Exception:
-        logger.exception("Redis cache read failed for key=%s", key)
+        logger.exception("Redis cache read failed for key=%s", concrete_key)
         return None
 
     if not raw:
@@ -83,24 +113,38 @@ async def cache_get_json(key: str) -> Any | None:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Invalid JSON payload in cache for key=%s", key)
+        logger.warning("Invalid JSON payload in cache for key=%s", concrete_key)
         return None
 
 
-async def cache_set_json(key: str, value: Any, ttl_seconds: int) -> None:
+async def cache_set_json(
+    key: str,
+    value: Any,
+    ttl_seconds: int,
+    *,
+    index_key: str | None = None,
+) -> None:
+    concrete_key = key
+    if index_key:
+        version = await _get_index_version(index_key)
+        concrete_key = _versioned_cache_key(key, version)
+
     payload = json.dumps(jsonable_encoder(value), ensure_ascii=False, separators=(",", ":"))
     try:
         client = await _get_redis_client()
-        await client.set(key, payload, ex=max(1, int(ttl_seconds)))
+        await client.set(concrete_key, payload, ex=max(1, int(ttl_seconds)))
     except Exception:
-        logger.exception("Redis cache write failed for key=%s", key)
+        logger.exception("Redis cache write failed for key=%s", concrete_key)
 
 
 async def cache_add_to_index(index_key: str, cache_key: str, ttl_seconds: int) -> None:
     try:
         client = await _get_redis_client()
-        await client.sadd(index_key, cache_key)
-        await client.expire(index_key, max(1, int(ttl_seconds)))
+        version = await _get_index_version(index_key)
+        members_key = _index_members_key(index_key, version)
+        concrete_cache_key = _versioned_cache_key(cache_key, version)
+        await client.sadd(members_key, concrete_cache_key)
+        await client.expire(members_key, max(1, int(ttl_seconds)))
     except Exception:
         logger.exception("Redis cache index add failed for index=%s key=%s", index_key, cache_key)
 
@@ -108,9 +152,9 @@ async def cache_add_to_index(index_key: str, cache_key: str, ttl_seconds: int) -
 async def cache_invalidate_index(index_key: str) -> None:
     try:
         client = await _get_redis_client()
-        keys = await client.smembers(index_key)
-        if keys:
-            await client.delete(*list(keys))
-        await client.delete(index_key)
+        version_key = _index_version_key(index_key)
+        next_version = await client.incr(version_key)
+        previous_members_key = _index_members_key(index_key, max(1, int(next_version) - 1))
+        await client.delete(previous_members_key)
     except Exception:
         logger.exception("Redis cache index invalidation failed for index=%s", index_key)

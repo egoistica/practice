@@ -21,9 +21,18 @@ def _resolve_log_level() -> str:
 
 def _resolve_log_file(service_name: str) -> str:
     configured = str(getattr(settings, "LOG_FILE_PATH", "") or "").strip()
-    if configured:
-        return configured
     normalized = service_name.strip().lower() or "backend"
+    if configured:
+        if "{service_name}" in configured:
+            try:
+                return configured.format(service_name=normalized)
+            except Exception:
+                pass
+
+        looks_like_directory = configured.endswith(os.sep) or os.path.isdir(configured)
+        if looks_like_directory:
+            return str(Path(configured) / f"{normalized}.log")
+
     return f"logs/{normalized}.log"
 
 

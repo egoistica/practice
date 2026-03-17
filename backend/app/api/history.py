@@ -24,6 +24,8 @@ from app.models.user import User
 from app.schemas.engagement import HistoryLectureResponse, HistoryListResponse
 
 router = APIRouter(prefix="/history", tags=["history"])
+TERMINAL_HISTORY_STATUSES = {"done", "error", "completed", "failed"}
+SHORT_LIVED_NON_TERMINAL_CACHE_TTL_SECONDS = 10
 
 
 def _to_history_response(history: History, lecture: Lecture) -> HistoryLectureResponse:
@@ -37,6 +39,13 @@ def _to_history_response(history: History, lecture: Lecture) -> HistoryLectureRe
     )
 
 
+def _is_non_terminal_history_item(item: HistoryLectureResponse) -> bool:
+    status_value = str(item.status or "").strip().lower()
+    if status_value not in TERMINAL_HISTORY_STATUSES:
+        return True
+    return int(item.processing_progress) < 100
+
+
 @router.get("", response_model=HistoryListResponse)
 async def list_history(
     skip: int = Query(default=0, ge=0),
@@ -45,11 +54,14 @@ async def list_history(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> HistoryListResponse:
+    index_key = history_list_cache_index(user.id)
     cache_key = history_list_cache_key(user.id, skip, limit, sort_order)
-    cached_payload = await cache_get_json(cache_key)
+    cached_payload = await cache_get_json(cache_key, index_key=index_key)
     if isinstance(cached_payload, dict):
         try:
-            return HistoryListResponse.model_validate(cached_payload)
+            cached_response = HistoryListResponse.model_validate(cached_payload)
+            if not any(_is_non_terminal_history_item(item) for item in cached_response.items):
+                return cached_response
         except ValidationError:
             pass
 
@@ -79,8 +91,23 @@ async def list_history(
         skip=skip,
         limit=limit,
     )
-    await cache_set_json(cache_key, response.model_dump(mode="json"), CACHE_TTL_LIST_SECONDS)
-    await cache_add_to_index(history_list_cache_index(user.id), cache_key, CACHE_TTL_LIST_SECONDS)
+    has_non_terminal = any(_is_non_terminal_history_item(item) for item in response.items)
+    if has_non_terminal:
+        await cache_set_json(
+            cache_key,
+            response.model_dump(mode="json"),
+            SHORT_LIVED_NON_TERMINAL_CACHE_TTL_SECONDS,
+            index_key=index_key,
+        )
+        await cache_add_to_index(index_key, cache_key, SHORT_LIVED_NON_TERMINAL_CACHE_TTL_SECONDS)
+    else:
+        await cache_set_json(
+            cache_key,
+            response.model_dump(mode="json"),
+            CACHE_TTL_LIST_SECONDS,
+            index_key=index_key,
+        )
+        await cache_add_to_index(index_key, cache_key, CACHE_TTL_LIST_SECONDS)
     return response
 
 
