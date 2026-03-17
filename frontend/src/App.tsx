@@ -1,6 +1,7 @@
 import { Suspense, lazy } from "react";
 import { Link, Navigate, Outlet, Route, Routes } from "react-router-dom";
 
+import TokenBadge from "./components/TokenBadge";
 import { useAuth } from "./hooks/useAuth";
 import DashboardPage from "./pages/Dashboard";
 import AdminDashboardPage from "./pages/admin/AdminDashboard";
@@ -12,6 +13,7 @@ import FavouritesPage from "./pages/Favourites";
 import HistoryPage from "./pages/History";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
+import TokensPage from "./pages/TokensPage";
 import UploadPage from "./pages/Upload";
 
 const LecturePage = lazy(() => import("./pages/Lecture"));
@@ -76,11 +78,17 @@ export default function App() {
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", margin: "2rem" }}>
-      <h1>Lecture Notes Frontend</h1>
-      <p>Status: {isLoading ? "loading..." : isAuthenticated ? "authenticated" : "guest"}</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem" }}>
+        <div>
+          <h1>Lecture Notes Frontend</h1>
+          <p>Status: {isLoading ? "loading..." : isAuthenticated ? "authenticated" : "guest"}</p>
+        </div>
+        <TokenBadge />
+      </div>
       <nav style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
         <Link to="/home">Home</Link>
         <Link to="/dashboard">Dashboard</Link>
+        {isAuthenticated ? <Link to="/tokens">Tokens</Link> : null}
         {isAuthenticated ? <Link to="/favourites">Favourites</Link> : null}
         {isAuthenticated ? <Link to="/history">History</Link> : null}
         {isAdmin ? <Link to="/admin">Admin</Link> : null}
@@ -100,6 +108,7 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/tokens" element={<TokensPage />} />
         <Route path="/favourites" element={<FavouritesPage />} />
         <Route path="/history" element={<HistoryPage />} />
         <Route element={<AdminRoute />} path="/admin">
