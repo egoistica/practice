@@ -46,9 +46,9 @@ export async function fetchTokenHistoryPage(skip: number, limit: number): Promis
   if (!Number.isInteger(skip) || skip < 0) {
     throw new Error(`Invalid pagination parameter 'skip': expected a non-negative integer, got ${String(skip)}`);
   }
-  if (!Number.isInteger(limit) || limit < 0) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new Error(
-      `Invalid pagination parameter 'limit': expected a non-negative integer, got ${String(limit)}`,
+      `Invalid pagination parameter 'limit': expected an integer between 1 and 100, got ${String(limit)}`,
     );
   }
 
