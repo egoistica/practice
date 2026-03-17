@@ -16,6 +16,7 @@ from .api import (
     history_router,
     lectures_router,
     lectures_ws_router,
+    tokens_router,
 )
 from .core.config import settings
 from .core.dependencies import get_celery_app
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(history_router)
     app.include_router(lectures_router)
     app.include_router(lectures_ws_router)
+    app.include_router(tokens_router)
 
     @app.on_event("startup")
     async def startup_progress_listener() -> None:

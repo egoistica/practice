@@ -7,6 +7,7 @@ from .favourites import router as favourites_router
 from .history import router as history_router
 from .lectures import router as lectures_router
 from .lectures import ws_router as lectures_ws_router
+from .tokens import router as tokens_router
 
 __all__ = [
     "admin_stats_router",
@@ -16,4 +17,5 @@ __all__ = [
     "history_router",
     "lectures_router",
     "lectures_ws_router",
+    "tokens_router",
 ]
