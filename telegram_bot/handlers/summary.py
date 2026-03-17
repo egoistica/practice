@@ -10,30 +10,25 @@ from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton
 
 try:
     from telegram_bot.auth import BotAuthError, ensure_authorized_telegram_user
+    from telegram_bot.utils import get_api_base_url
 except ModuleNotFoundError:
     from auth import BotAuthError, ensure_authorized_telegram_user
+    from utils import get_api_base_url
 
 router = Router(name="summary")
 
 REQUEST_TIMEOUT_SECONDS = 40
 MAX_MESSAGE_LEN = 3800
-DEFAULT_API_BASE_URL = "http://backend:8000"
+_CHUNK_SAFETY_MARGIN = 32
 
 _QUOTE_TERM_RE = re.compile(r"[\"«]([^\"»]{2,80})[\"»]")
 _DEF_TERM_RE = re.compile(r"(?:^|[\n\.]\s*)([A-ZА-Я][A-Za-zА-Яа-я0-9\- ]{2,40}):")
 _MD_V2_SPECIALS = "\\_*[]()~`>#+-=|{}.!"
 
 
-def _api_base_url() -> str:
-    import os
-
-    raw = os.getenv("API_BASE_URL")
-    return raw.strip() if raw and raw.strip() else DEFAULT_API_BASE_URL
-
-
 def _api_get_summary(token: str, lecture_id: str) -> dict[str, Any]:
     response = requests.get(
-        f"{_api_base_url().rstrip('/')}/lectures/{lecture_id}/summary",
+        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/summary",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -44,7 +39,7 @@ def _api_get_summary(token: str, lecture_id: str) -> dict[str, Any]:
 
 def _api_export_pdf(token: str, lecture_id: str) -> bytes:
     response = requests.get(
-        f"{_api_base_url().rstrip('/')}/lectures/{lecture_id}/export?format=pdf",
+        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/export?format=pdf",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -81,64 +76,91 @@ def _escape_markdown_v2(text: str) -> str:
     return escaped
 
 
-def _apply_markdown_formatting(text: str) -> str:
-    escaped = _escape_markdown_v2(text.strip())
-    if not escaped:
-        return escaped
-
-    terms = _extract_key_terms(text)
+def _highlight_terms_in_escaped_text(escaped_text: str, terms: list[str]) -> str:
+    highlighted = escaped_text
     for term in terms:
         escaped_term = _escape_markdown_v2(term)
-        escaped = escaped.replace(escaped_term, f"*{escaped_term}*", 1)
-    return escaped
+        if not escaped_term:
+            continue
+        highlighted = highlighted.replace(escaped_term, f"*{escaped_term}*", 1)
+    return highlighted
 
 
-def _build_block_html(block: dict[str, Any]) -> str:
+def _split_escaped_text(escaped_text: str, max_len: int) -> list[str]:
+    if max_len <= 0:
+        return []
+    remaining = escaped_text.strip()
+    if not remaining:
+        return []
+
+    chunks: list[str] = []
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+
+        split_at = max_len
+        newline_pos = remaining.rfind("\n", 0, max_len + 1)
+        space_pos = remaining.rfind(" ", 0, max_len + 1)
+        boundary = max(newline_pos, space_pos)
+        if boundary >= int(max_len * 0.6):
+            split_at = boundary
+
+        chunk = remaining[:split_at].rstrip()
+        if not chunk:
+            chunk = remaining[:max_len]
+        chunks.append(chunk)
+        remaining = remaining[len(chunk) :].lstrip()
+
+    return chunks
+
+
+def _build_block_header(block: dict[str, Any]) -> str:
     title = _escape_markdown_v2(str(block.get("title", "Блок")).strip() or "Блок")
     block_type = _escape_markdown_v2(str(block.get("type", "thought")).strip() or "thought")
-    text = _apply_markdown_formatting(str(block.get("text", "")))
     time_start = block.get("timecode_start")
     time_end = block.get("timecode_end")
 
-    header = f"*## {title}*\n_Тип: {block_type}_"
+    header = f"*\\#\\# {title}*\n_Тип: {block_type}_"
     if time_start is not None or time_end is not None:
         header += (
             "\n_Таймкод: "
             f"{_escape_markdown_v2(str(time_start))} - {_escape_markdown_v2(str(time_end))}_"
         )
-    return f"{header}\n{text}".strip()
+    return header.strip()
 
 
 def _split_summary_chunks(blocks: list[dict[str, Any]]) -> list[str]:
     chunks: list[str] = []
-    current = ""
-
     for block in blocks:
-        block_text = _build_block_html(block)
-        if not block_text:
+        header = _build_block_header(block)
+        raw_text = str(block.get("text", "")).strip()
+        escaped_body = _escape_markdown_v2(raw_text)
+        terms = _extract_key_terms(raw_text)
+
+        if not header and not escaped_body:
             continue
 
-        candidate = f"{current}\n\n{block_text}".strip() if current else block_text
-        if len(candidate) <= MAX_MESSAGE_LEN:
-            current = candidate
+        if not escaped_body:
+            if len(header) <= MAX_MESSAGE_LEN:
+                chunks.append(header)
+            else:
+                chunks.extend(_split_escaped_text(header, MAX_MESSAGE_LEN))
             continue
 
-        if current:
-            chunks.append(current)
-            current = ""
-
-        if len(block_text) <= MAX_MESSAGE_LEN:
-            current = block_text
+        first_limit = max(200, MAX_MESSAGE_LEN - len(header) - 1 - _CHUNK_SAFETY_MARGIN)
+        first_body_chunks = _split_escaped_text(escaped_body, first_limit)
+        if not first_body_chunks:
+            chunks.append(header[:MAX_MESSAGE_LEN])
             continue
 
-        start = 0
-        while start < len(block_text):
-            end = min(start + MAX_MESSAGE_LEN, len(block_text))
-            chunks.append(block_text[start:end])
-            start = end
+        first_body = _highlight_terms_in_escaped_text(first_body_chunks[0], terms)
+        chunks.append(f"{header}\n{first_body}".strip())
 
-    if current:
-        chunks.append(current)
+        remaining = escaped_body[len(first_body_chunks[0]) :].lstrip()
+        for part in _split_escaped_text(remaining, MAX_MESSAGE_LEN - _CHUNK_SAFETY_MARGIN):
+            chunks.append(_highlight_terms_in_escaped_text(part, terms))
+
     return chunks
 
 

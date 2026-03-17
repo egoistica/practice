@@ -27,9 +27,11 @@ from aiogram.types import (
 try:
     from telegram_bot.auth import BotAuthError, ensure_authorized_telegram_user
     from telegram_bot.handlers.auth import request_auth_method
+    from telegram_bot.utils import get_api_base_url
 except ModuleNotFoundError:
     from auth import BotAuthError, ensure_authorized_telegram_user
     from handlers.auth import request_auth_method
+    from utils import get_api_base_url
 
 router = Router(name="upload")
 logger = logging.getLogger(__name__)
@@ -51,7 +53,6 @@ READY_ACTIONS_KEYBOARD = lambda lecture_id: InlineKeyboardMarkup(  # noqa: E731
 )
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-DEFAULT_API_BASE_URL = "http://backend:8000"
 REQUEST_TIMEOUT_SECONDS = 40
 POLL_INTERVAL_SECONDS = 2
 MAX_PROGRESS_POLLS = 300
@@ -63,13 +64,6 @@ class UploadStates(StatesGroup):
     waiting_source = State()
     waiting_mode = State()
     creating_lecture = State()
-
-
-def _api_base_url() -> str:
-    raw = os.getenv("API_BASE_URL")
-    return raw.strip() if raw and raw.strip() else DEFAULT_API_BASE_URL
-
-
 def _extract_first_url(text: str) -> str | None:
     match = URL_RE.search(text)
     if not match:
@@ -149,7 +143,7 @@ def _raise_api_error(response: requests.Response, *, context: str) -> None:
 
 def _api_post_lecture_url(token: str, *, title: str, mode: str, source_url: str) -> dict[str, Any]:
     response = requests.post(
-        f"{_api_base_url().rstrip('/')}/lectures",
+        f"{get_api_base_url().rstrip('/')}/lectures",
         headers={"Authorization": f"Bearer {token}"},
         data={
             "title": title,
@@ -175,7 +169,7 @@ def _api_post_lecture_file(
 ) -> dict[str, Any]:
     with open(file_path, "rb") as stream:
         response = requests.post(
-            f"{_api_base_url().rstrip('/')}/lectures",
+            f"{get_api_base_url().rstrip('/')}/lectures",
             headers={"Authorization": f"Bearer {token}"},
             data={
                 "title": title,
@@ -192,7 +186,7 @@ def _api_post_lecture_file(
 
 def _api_get_lecture(token: str, lecture_id: str) -> dict[str, Any]:
     response = requests.get(
-        f"{_api_base_url().rstrip('/')}/lectures/{lecture_id}",
+        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -203,7 +197,7 @@ def _api_get_lecture(token: str, lecture_id: str) -> dict[str, Any]:
 
 def _api_get_summary(token: str, lecture_id: str) -> dict[str, Any]:
     response = requests.get(
-        f"{_api_base_url().rstrip('/')}/lectures/{lecture_id}/summary",
+        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/summary",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -214,7 +208,7 @@ def _api_get_summary(token: str, lecture_id: str) -> dict[str, Any]:
 
 def _api_get_graph(token: str, lecture_id: str) -> dict[str, Any]:
     response = requests.get(
-        f"{_api_base_url().rstrip('/')}/lectures/{lecture_id}/graph",
+        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/graph",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -225,7 +219,7 @@ def _api_get_graph(token: str, lecture_id: str) -> dict[str, Any]:
 
 def _api_export_markdown(token: str, lecture_id: str) -> bytes:
     response = requests.get(
-        f"{_api_base_url().rstrip('/')}/lectures/{lecture_id}/export?format=md",
+        f"{get_api_base_url().rstrip('/')}/lectures/{lecture_id}/export?format=md",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -236,7 +230,7 @@ def _api_export_markdown(token: str, lecture_id: str) -> bytes:
 
 def _api_add_favourite(token: str, lecture_id: str) -> None:
     response = requests.post(
-        f"{_api_base_url().rstrip('/')}/favourites/{lecture_id}",
+        f"{get_api_base_url().rstrip('/')}/favourites/{lecture_id}",
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
