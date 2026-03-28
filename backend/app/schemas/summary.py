@@ -8,7 +8,6 @@ from pydantic import BaseModel
 class SummaryBlock(BaseModel):
     title: str
     text: str
-    type: str
     timecode_start: float | None = None
     timecode_end: float | None = None
 

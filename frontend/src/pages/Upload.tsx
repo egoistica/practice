@@ -32,7 +32,13 @@ function extractErrorMessage(error: unknown): string {
     if (Array.isArray(detail) && detail.length > 0) {
       const first = detail[0];
       if (first && typeof first === "object" && typeof first.msg === "string") {
-        return first.msg;
+        const loc = Array.isArray(first.loc)
+          ? first.loc
+              .map((item) => String(item))
+              .filter((item) => item !== "body")
+              .join(".")
+          : "";
+        return loc ? `${loc}: ${first.msg}` : first.msg;
       }
     }
   }

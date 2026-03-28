@@ -13,6 +13,7 @@ type LectureResponse = {
   id: string;
   title: string;
   status: string;
+  mode: "instant" | "realtime" | string;
   processing_progress: number;
   created_at: string;
 };
@@ -20,7 +21,6 @@ type LectureResponse = {
 type SummaryBlock = {
   title: string;
   text: string;
-  type: string;
   timecode_start: number | null;
   timecode_end: number | null;
 };
@@ -123,10 +123,10 @@ export default function LecturePage() {
       return response.data;
     },
     refetchInterval: (query) => {
-      if (query.state.status === "error") {
-        return false;
-      }
       const status = normalizeStatus(query.state.data?.status);
+      if (query.state.status === "error" && !query.state.data) {
+        return 5000;
+      }
       return isTerminalStatus(status) ? false : 3000;
     },
   });
@@ -156,22 +156,53 @@ export default function LecturePage() {
   }, [effectiveStatus, liveProgress]);
 
   const canRenderLectureContent = !lectureQuery.isError && Boolean(lectureQuery.data);
+  const lectureMode = (lectureQuery.data?.mode || "instant").toLowerCase();
+  const allowProgressiveContent = lectureMode === "realtime";
+  const shouldLoadArtifacts = canRenderLectureContent && (allowProgressiveContent || effectiveStatus === "done");
 
   const summaryQuery = useQuery({
     queryKey: ["lecture-summary", lectureId],
-    enabled: Boolean(isAuthenticated && lectureId && canRenderLectureContent && effectiveStatus === "done"),
+    enabled: Boolean(isAuthenticated && lectureId && shouldLoadArtifacts),
     queryFn: async () => {
-      const response = await apiClient.get<SummaryResponse>(`/lectures/${lectureId}/summary`);
-      return response.data;
+      try {
+        const response = await apiClient.get<SummaryResponse>(`/lectures/${lectureId}/summary`);
+        return response.data;
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 404) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    refetchInterval: (query) => {
+      const status = normalizeStatus(lectureQuery.data?.status);
+      if (query.state.status === "error") {
+        return isTerminalStatus(status) ? false : 5000;
+      }
+      return isTerminalStatus(status) ? false : 3000;
     },
   });
 
   const graphQuery = useQuery({
     queryKey: ["lecture-graph", lectureId],
-    enabled: Boolean(isAuthenticated && lectureId && canRenderLectureContent && effectiveStatus === "done"),
+    enabled: Boolean(isAuthenticated && lectureId && shouldLoadArtifacts),
     queryFn: async () => {
-      const response = await apiClient.get<GraphResponse>(`/lectures/${lectureId}/graph`);
-      return response.data;
+      try {
+        const response = await apiClient.get<GraphResponse>(`/lectures/${lectureId}/graph`);
+        return response.data;
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 404) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    refetchInterval: (query) => {
+      const status = normalizeStatus(lectureQuery.data?.status);
+      if (query.state.status === "error") {
+        return isTerminalStatus(status) ? false : 5000;
+      }
+      return isTerminalStatus(status) ? false : 3000;
     },
   });
 
@@ -222,7 +253,7 @@ export default function LecturePage() {
 
           {effectiveStatus !== "done" && effectiveStatus !== "error" ? (
             <p style={{ margin: 0 }}>
-              Lecture is being processed. Summary and graph will appear after completion.
+              Lecture is being processed. {allowProgressiveContent ? "Summary and graph may appear during processing." : "Summary and graph will appear after completion."}
             </p>
           ) : null}
 
@@ -232,55 +263,61 @@ export default function LecturePage() {
             </p>
           ) : null}
 
-          {effectiveStatus === "done" ? (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-                gap: "1rem",
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                {summaryQuery.isLoading ? <p>Loading summary...</p> : null}
-                {summaryQuery.isError ? (
-                  <p style={{ color: "#b00020", margin: 0 }} role="alert">
-                    {extractErrorMessage(summaryQuery.error, "Failed to load summary.")}
-                  </p>
-                ) : null}
-                {summaryQuery.data ? (
-                  <SummaryView
-                    entityLabels={(graphQuery.data?.nodes ?? []).map((node) => node.label)}
-                    lectureId={lectureId}
-                    onEntityClick={setHighlightedEntityLabel}
-                    onTimecodeClick={setSelectedTimecode}
-                    summary={summaryQuery.data}
-                  />
-                ) : null}
-              </div>
-
-              <div style={{ minWidth: 0 }}>
-                {selectedTimecode !== null ? (
-                  <p style={{ marginTop: 0 }}>
-                    Selected timecode: <strong>{selectedTimecode}s</strong>
-                  </p>
-                ) : null}
-                {graphQuery.isLoading ? <p>Loading graph...</p> : null}
-                {graphQuery.isError ? (
-                  <p style={{ color: "#b00020", margin: 0 }} role="alert">
-                    {extractErrorMessage(graphQuery.error, "Failed to load graph.")}
-                  </p>
-                ) : null}
-                {graphQuery.data ? (
-                  <EntityGraph
-                    graph={graphQuery.data}
-                    highlightedEntityLabel={highlightedEntityLabel}
-                    lectureId={lectureId}
-                    onTimecodeClick={setSelectedTimecode}
-                  />
-                ) : null}
-              </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+              gap: "1rem",
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              {summaryQuery.isLoading ? <p>Loading summary...</p> : null}
+              {summaryQuery.isError ? (
+                <p style={{ color: "#b00020", margin: 0 }} role="alert">
+                  {extractErrorMessage(summaryQuery.error, "Failed to load summary.")}
+                </p>
+              ) : null}
+              {summaryQuery.data ? (
+                <SummaryView
+                  entityLabels={(graphQuery.data?.nodes ?? []).map((node) => node.label)}
+                  lectureId={lectureId}
+                  onEntityClick={setHighlightedEntityLabel}
+                  onTimecodeClick={setSelectedTimecode}
+                  summary={summaryQuery.data}
+                />
+              ) : effectiveStatus !== "error" ? (
+                <p style={{ margin: 0, color: "#4b5563" }}>
+                  {allowProgressiveContent ? "Summary is being generated and may appear during processing." : "Summary will be available after processing is complete."}
+                </p>
+              ) : null}
             </div>
-          ) : null}
+
+            <div style={{ minWidth: 0 }}>
+              {selectedTimecode !== null ? (
+                <p style={{ marginTop: 0 }}>
+                  Selected timecode: <strong>{selectedTimecode}s</strong>
+                </p>
+              ) : null}
+              {graphQuery.isLoading ? <p>Loading graph...</p> : null}
+              {graphQuery.isError ? (
+                <p style={{ color: "#b00020", margin: 0 }} role="alert">
+                  {extractErrorMessage(graphQuery.error, "Failed to load graph.")}
+                </p>
+              ) : null}
+              {graphQuery.data ? (
+                <EntityGraph
+                  graph={graphQuery.data}
+                  highlightedEntityLabel={highlightedEntityLabel}
+                  lectureId={lectureId}
+                  onTimecodeClick={setSelectedTimecode}
+                />
+              ) : effectiveStatus !== "error" ? (
+                <p style={{ margin: 0, color: "#4b5563" }}>
+                  {allowProgressiveContent ? "Entity graph will appear as entities are extracted." : "Entity graph will be available after processing is complete."}
+                </p>
+              ) : null}
+            </div>
+          </div>
         </>
       ) : null}
     </section>

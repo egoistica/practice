@@ -1,13 +1,12 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
 import uuid
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import redis.asyncio as redis
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, Response as FastAPIResponse, UploadFile, WebSocket, status
 from fastapi.responses import Response, StreamingResponse
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
@@ -105,6 +104,7 @@ def _to_lecture_response(lecture: Lecture) -> LectureResponse:
         id=lecture.id,
         title=lecture.title,
         status=str(lecture.status.value if hasattr(lecture.status, "value") else lecture.status),
+        mode=str(lecture.mode.value if hasattr(lecture.mode, "value") else lecture.mode),
         processing_progress=lecture.processing_progress,
         created_at=lecture.created_at,
     )
@@ -189,7 +189,6 @@ def _to_summary_response(summary: Summary) -> SummaryResponse:
         {
             "title": block["title"],
             "text": block["text"],
-            "type": block["type"],
             "timecode_start": block["timecode_start"],
             "timecode_end": block["timecode_end"],
         }
@@ -386,7 +385,26 @@ def _is_websocket_origin_allowed(websocket: WebSocket) -> bool:
         return True
     if settings.cors_allow_all:
         return True
-    return origin in settings.cors_origins_list
+    if origin in settings.cors_origins_list:
+        return True
+
+    if settings.is_dev_mode:
+        try:
+            parsed = urlparse(origin)
+            host = (parsed.hostname or "").lower()
+        except Exception:
+            return False
+
+        tunnel_suffixes = (
+            ".ngrok-free.dev",
+            ".ngrok.app",
+            ".trycloudflare.com",
+            ".loca.lt",
+        )
+        if host and any(host.endswith(suffix) for suffix in tunnel_suffixes):
+            return True
+
+    return False
 
 
 async def _receive_token_from_first_message(websocket: WebSocket) -> str:
@@ -485,11 +503,13 @@ async def parse_create_lecture_request(
 @limiter.limit("10/minute")
 async def create_lecture(
     request: Request,
+    response: FastAPIResponse,
     payload: CreateLectureRequest = Depends(parse_create_lecture_request),
-    file: UploadFile = File(default=None),
+    file: UploadFile | None = File(default=None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> LectureResponse:
+    _ = response
     lecture_id = uuid.uuid4()
     file_path: str | None = None
     source_url: str | None = str(payload.source_url) if payload.source_url else None
@@ -602,12 +622,14 @@ async def create_lecture(
 @limiter.limit("10/minute")
 async def list_lectures(
     request: Request,
+    response: FastAPIResponse,
     skip: int = 0,
     limit: int = 20,
     sort_order: Literal["asc", "desc"] = "desc",
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> LectureListResponse:
+    _ = response
     if skip < 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="skip must be >= 0")
     if limit < 1 or limit > 100:
@@ -666,13 +688,15 @@ async def list_lectures(
     return response
 
 
-@router.get("/{lecture_id}/progress")
+@router.get("/{lecture_id}/progress", response_model=None)
 @limiter.limit("60/minute")
 async def get_lecture_progress(
     request: Request,
+    response: FastAPIResponse,
     lecture_id: uuid.UUID,
     stream: bool = Query(default=False),
 ) -> Response | dict[str, Any]:
+    _ = response
     token = _normalize_bearer_token(_extract_request_token(request))
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -814,10 +838,12 @@ async def get_lecture_progress(
 @limiter.limit("30/minute")
 async def get_lecture(
     request: Request,
+    response: FastAPIResponse,
     lecture_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> LectureResponse:
+    _ = response
     lecture = await db.get(Lecture, lecture_id)
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")
@@ -1187,10 +1213,12 @@ async def enrich_lecture_graph(
 @limiter.limit("10/minute")
 async def delete_lecture(
     request: Request,
+    response: FastAPIResponse,
     lecture_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, str]:
+    _ = response
     lecture = await db.get(Lecture, lecture_id)
     if lecture is None or lecture.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lecture not found")

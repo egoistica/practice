@@ -9,9 +9,13 @@ import {
   type ReactNode,
 } from "react";
 
-import { AUTH_TOKEN_STORAGE_KEY, apiClient, setAccessToken } from "../api/client";
-
-export const AUTH_REFRESH_TOKEN_STORAGE_KEY = "auth_refresh_token";
+import {
+  AUTH_STATE_CHANGED_EVENT,
+  AUTH_REFRESH_TOKEN_STORAGE_KEY,
+  AUTH_TOKEN_STORAGE_KEY,
+  apiClient,
+  setAccessToken,
+} from "../api/client";
 
 type TokenResponse = {
   access_token: string;
@@ -124,6 +128,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccessToken(token);
     void refreshUser().catch(() => undefined);
   }, [applyTokens, refreshUser, token]);
+
+  useEffect(() => {
+    const syncFromStorage = () => {
+      const nextToken = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+      const nextRefreshToken = localStorage.getItem(AUTH_REFRESH_TOKEN_STORAGE_KEY);
+      setToken(nextToken);
+      setRefreshToken(nextRefreshToken);
+      setAccessToken(nextToken);
+      if (!nextToken) {
+        setUser(null);
+        setIsLoading(false);
+      }
+    };
+
+    window.addEventListener(AUTH_STATE_CHANGED_EVENT, syncFromStorage);
+    window.addEventListener("storage", syncFromStorage);
+    return () => {
+      window.removeEventListener(AUTH_STATE_CHANGED_EVENT, syncFromStorage);
+      window.removeEventListener("storage", syncFromStorage);
+    };
+  }, []);
 
   const login = useCallback(
     async (payload: LoginPayload) => {

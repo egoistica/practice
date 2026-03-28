@@ -32,7 +32,8 @@ ENRICH_PROMPT_BASE = (
 SYSTEM_PROMPT = (
     "Ты помощник по созданию конспектов лекций. Верни только валидный JSON без markdown. "
     "Точный формат: "
-    '{"blocks":[{"title":"...","text":"...","type":"thought|definition|date|conclusion"}]}.'
+    '{"blocks":[{"title":"...","text":"..."}]}. '
+    "Поле type необязательно; если есть, оно будет обработано."
 )
 ENTITY_SYSTEM_PROMPT = (
     "Ты извлекаешь сущности и связи из учебного текста. "
@@ -40,6 +41,8 @@ ENTITY_SYSTEM_PROMPT = (
     "Формат: "
     '{"nodes":[{"id":"...","label":"...","type":"...","mentions":[{"position_in_text":0,"timecode":0.0}]}],'
     '"edges":[{"source":"...","target":"...","label":"..."}]}.'
+    "Для поля label в edges используй осмысленные связи (например: explains, leads_to, depends_on, implements, defined_by, uses), "
+    "не используй универсальное related_to без необходимости."
     "Если время упоминания неизвестно, указывай timecode: null или опускай поле timecode."
     "Если сущности не найдены, верни строго: {\"nodes\": [], \"edges\": []}."
 )
@@ -54,6 +57,47 @@ ENRICH_SYSTEM_PROMPT = (
 ALLOWED_BLOCK_TYPES = {"thought", "definition", "date", "conclusion"}
 ALLOWED_ENTITY_NODE_TYPES = {"term", "technology", "concept", "person"}
 DEFAULT_EDGE_LABEL = "related_to"
+GENERIC_EDGE_LABELS = {
+    "related_to",
+    "related",
+    "relation",
+    "connection",
+    "linked_to",
+    "link",
+    "assoc",
+    "associated_with",
+    "связано",
+    "связан",
+    "связь",
+}
+ENTITY_FALLBACK_STOPWORDS = {
+    "and",
+    "the",
+    "that",
+    "this",
+    "with",
+    "from",
+    "for",
+    "что",
+    "это",
+    "как",
+    "или",
+    "так",
+    "где",
+    "когда",
+    "если",
+    "чтобы",
+    "лишь",
+    "только",
+    "быть",
+    "было",
+    "были",
+    "есть",
+    "все",
+    "очень",
+    "тоже",
+    "после",
+}
 RESERVED_COMPLETION_KWARGS = {
     "messages",
     "model",
@@ -70,16 +114,19 @@ RESERVED_COMPLETION_KWARGS = {
     "project",
 }
 SUMMARY_AGENT_PROMPT = (
-    "Ты помощник по созданию конспектов лекций.\n"
-    "Верни только валидный JSON строго по заданной схеме.\n"
+    "Ты создаешь компактный конспект фрагмента лекции.\n"
+    "Верни только валидный JSON строго по схеме.\n"
     "Не используй markdown.\n"
     "Не добавляй пояснений вне JSON.\n\n"
-    "Каждый блок ОБЯЗАТЕЛЬНО должен содержать поля: title, text, type.\n"
-    "Поле type ОБЯЗАТЕЛЬНО должно быть одним из: thought, definition, date, conclusion.\n"
-    "Если не подходит ни один специальный тип, используй thought.\n"
-    "Выделяй главные мысли, определения, даты и выводы.\n"
-    "Разбивай результат на логические блоки.\n"
-    "Если текст шумный после распознавания речи, убирай мусор и сохраняй только полезную информацию.\n"
+    "Формат: {\"blocks\":[{\"title\":\"...\",\"text\":\"...\"}]}.\n"
+    "Сначала определи 1-3 главные идеи фрагмента.\n"
+    "Возвращай только идеи, а не последовательный пересказ.\n"
+    "Объединяй близкие мысли в один блок.\n"
+    "Не создавай блок ради примера, детали или повтора.\n"
+    "Обычно возвращай 1-3 блока; 4 блока допустимы только если мысли действительно независимы.\n"
+    "Заголовок должен быть коротким и смысловым.\n"
+    "Текст блока должен быть 1-3 предложениями, связным и чистым.\n"
+    "Убирай артефакты распознавания речи, обрывки, междометия, словесный мусор.\n"
 )
 ENTITY_GRAPH_AGENT_PROMPT = (
     "Ты помощник по извлечению сущностей из лекций.\n"
@@ -92,6 +139,7 @@ ENTITY_GRAPH_AGENT_PROMPT = (
     "Каждый узел должен иметь поля id, label, type.\n"
     "Тип узла должен быть одним из: term, technology, concept, person.\n"
     "Каждая связь должна иметь поля source, target, label.\n"
+    "Для label используй осмысленную короткую связь (например: explains, leads_to, depends_on, implements, defined_by, uses), не своди всё к related_to.\n"
     "source и target должны ссылаться на id узлов.\n"
     "Если не уверен в типе сущности, используй concept.\n"
 )
@@ -111,13 +159,18 @@ FINAL_SUMMARY_AGENT_PROMPT = (
     "Верни только валидный JSON строго по заданной схеме.\n"
     "Не используй markdown.\n"
     "Не добавляй пояснений вне JSON.\n\n"
-    "Объедини готовые блоки конспекта в итоговый структурированный конспект.\n"
-    "Сохрани основные мысли, определения, даты и выводы.\n"
-    "Убери повторы и не теряй важную информацию.\n"
+    "Сначала выдели главные темы лекции.\n"
+    "Затем сгруппируй входные блоки по темам и соседству (section_id/order/timecode).\n"
+    "Для каждой темы создай один итоговый блок.\n"
+    "Если блок не добавляет новой информации, не включай его.\n"
+    "Если соседние блоки про одно и то же, обязательно слей их.\n"
+    "Не сохраняй формулировки с признаками шумной транскрипции.\n"
+    "Собирай близкие блоки в более крупные смысловые секции, а не в микропункты.\n"
+    "Для длинной лекции ориентируйся на 12-24 блока; для короткой на 6-12 блоков.\n"
     "Возвращай результат только в формате final_summary.\n"
     "В final_summary обязательно должны быть поля title и blocks.\n"
-    "Каждый блок должен содержать title, text, type.\n"
-    "Поле type: thought, definition, date, conclusion.\n"
+    "Каждый блок должен содержать title и text.\n"
+    "Поле type можно не добавлять.\n"
 )
 
 
@@ -170,7 +223,40 @@ def run_summary_agent(
         default_max_tokens=1200,
         default_timeout=60.0,
     )
-    return _parse_summary_payload(raw_content)
+    try:
+        return _parse_summary_payload(raw_content)
+    except LLMResponseParseError:
+        logger.exception(
+            "Summary response parse failed. Attempting strict JSON retry. raw_content=%s",
+            _truncate_for_log(raw_content, limit=2000),
+        )
+
+    retry_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Верни только валидный JSON без markdown и пояснений. "
+                'Формат: {"blocks":[{"title":"...","text":"..."}]}. '
+                "Поле type необязательно."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Преобразуй предыдущий ответ в строго валидный JSON требуемого формата без лишнего текста:\n\n"
+                f"{raw_content}"
+            ),
+        },
+    ]
+    retry_content = _run_llm_completion(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+        messages=retry_messages,
+        default_temperature=0.0,
+        default_max_tokens=900,
+        default_timeout=45.0,
+    )
+    return _parse_summary_payload(retry_content)
 
 
 def summarize_segment(text: str, llm_config: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -214,7 +300,49 @@ def run_entity_graph_agent(
         default_max_tokens=800,
         default_timeout=90.0,
     )
-    return _parse_entities_payload(raw_content, selected_clean)
+    try:
+        return _parse_entities_payload(raw_content, selected_clean)
+    except LLMResponseParseError:
+        logger.exception(
+            "Entity graph response parse failed. Attempting strict JSON retry. raw_content=%s",
+            _truncate_for_log(raw_content, limit=2000),
+        )
+
+    retry_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Верни только валидный JSON без markdown и пояснений. "
+                "Формат: "
+                '{"nodes":[{"id":"...","label":"...","type":"term|technology|concept|person"}],'
+                '"edges":[{"source":"...","target":"...","label":"explains|implemented_by|implements|defined_by|refers_to|related_concept"}]}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Предыдущий ответ был невалидным JSON. "
+                "Преобразуй смысл этого ответа в требуемый JSON без лишнего текста:\n\n"
+                f"{raw_content}"
+            ),
+        },
+    ]
+    retry_content = _run_llm_completion(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+        messages=retry_messages,
+        default_temperature=0.0,
+        default_max_tokens=900,
+        default_timeout=60.0,
+    )
+    try:
+        return _parse_entities_payload(retry_content, selected_clean)
+    except LLMResponseParseError:
+        logger.exception(
+            "Entity graph retry parse failed. Using heuristic fallback. retry_content=%s",
+            _truncate_for_log(retry_content, limit=2000),
+        )
+        return _build_heuristic_entity_graph(lecture_text=normalized_text, selected_entities=selected_clean)
 
 
 def extract_entities(
@@ -294,7 +422,7 @@ def run_final_summary_agent(
     request_cfg = _resolve_request_config(llm_config)
     user_prompt = str(llm_config.get("prompt") or FINAL_SUMMARY_AGENT_PROMPT).strip()
     title_value = str(lecture_title or "").strip() or "Итоговый конспект"
-    blocks_json = json.dumps(summary_blocks, ensure_ascii=False)
+    blocks_json = json.dumps(_prepare_final_summary_input(summary_blocks), ensure_ascii=False)
 
     messages = [
         {
@@ -302,7 +430,8 @@ def run_final_summary_agent(
             "content": (
                 "Ты финально собираешь конспект. "
                 "Верни только валидный JSON без markdown. "
-                'Формат: {"final_summary":{"title":"...","blocks":[{"title":"...","text":"...","type":"thought|definition|date|conclusion"}]}}.'
+                'Формат: {"final_summary":{"title":"...","blocks":[{"title":"...","text":"..."}]}}. '
+                "Поле type необязательно."
             ),
         },
         {
@@ -310,7 +439,8 @@ def run_final_summary_agent(
             "content": (
                 f"{user_prompt}\n\n"
                 f"Название лекции: {title_value}\n"
-                f"summary_blocks:\n{blocks_json}"
+                "summary_blocks_with_meta:\n"
+                f"{blocks_json}"
             ),
         },
     ]
@@ -323,7 +453,20 @@ def run_final_summary_agent(
         default_max_tokens=1400,
         default_timeout=120.0,
     )
-    return _parse_final_summary_payload(raw_content)
+    try:
+        return _parse_final_summary_payload(raw_content)
+    except LLMResponseParseError:
+        logger.exception(
+            "Failed to parse final summary payload. Falling back to existing summary blocks. raw_content=%s",
+            _truncate_for_log(raw_content, limit=2000),
+        )
+        fallback_blocks = _normalize_existing_summary_blocks(summary_blocks)
+        return {
+            "final_summary": {
+                "title": title_value,
+                "blocks": fallback_blocks,
+            }
+        }
 
 
 def enrich_graph(
@@ -356,8 +499,51 @@ def enrich_graph(
         default_max_tokens=2000,
         default_timeout=120.0,
     )
-    payload = _parse_enrichment_payload(raw_content)
-    return merge_graph_data(nodes, edges, payload["nodes"], payload["edges"])
+    try:
+        payload = _parse_enrichment_payload(raw_content)
+        return merge_graph_data(nodes, edges, payload["nodes"], payload["edges"])
+    except LLMResponseParseError:
+        logger.exception(
+            "Graph enrichment parse failed. Attempting strict JSON retry. raw_content=%s",
+            _truncate_for_log(raw_content, limit=2000),
+        )
+
+    retry_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Верни только валидный JSON без markdown и пояснений. "
+                "Формат: "
+                '{"nodes":[{"id":"...","label":"...","type":"term|technology|concept|person"}],'
+                '"edges":[{"source":"...","target":"...","label":"explains|leads_to|depends_on|implements|defined_by|uses"}]}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Предыдущий ответ был невалидным JSON. "
+                "Преобразуй смысл ответа в требуемый JSON без лишнего текста:\n\n"
+                f"{raw_content}"
+            ),
+        },
+    ]
+    retry_content = _run_llm_completion(
+        request_cfg=request_cfg,
+        llm_config=llm_config,
+        messages=retry_messages,
+        default_temperature=0.0,
+        default_max_tokens=1200,
+        default_timeout=90.0,
+    )
+    try:
+        payload = _parse_enrichment_payload(retry_content)
+        return merge_graph_data(nodes, edges, payload["nodes"], payload["edges"])
+    except LLMResponseParseError:
+        logger.exception(
+            "Graph enrichment retry parse failed. Returning existing graph unchanged. retry_content=%s",
+            _truncate_for_log(retry_content, limit=2000),
+        )
+        return merge_graph_data(nodes, edges, [], [])
 
 
 def merge_graph_data(
@@ -623,6 +809,8 @@ def _extract_content(response: Any) -> str:
 
 def _parse_summary_payload(raw_content: str) -> dict[str, Any]:
     payload = _load_json_payload(raw_content)
+    payload = _select_summary_payload_candidate(payload, raw_content)
+    payload = _coerce_summary_payload(payload)
     if not isinstance(payload, dict):
         raise LLMResponseParseError("LLM response JSON must be an object")
 
@@ -654,6 +842,74 @@ def _parse_summary_payload(raw_content: str) -> dict[str, Any]:
     return {"blocks": blocks}
 
 
+def _select_summary_payload_candidate(initial_payload: Any, raw_content: str) -> Any:
+    if _contains_summary_markers(initial_payload):
+        return initial_payload
+
+    marker_keys = {"blocks", "summary", "final_summary", "result", "data", "payload", "response"}
+    for candidate in _iter_json_candidates(raw_content):
+        if isinstance(candidate, list):
+            return {"blocks": candidate}
+        if _contains_any_keys(candidate, marker_keys):
+            return candidate
+    return initial_payload
+
+
+def _contains_summary_markers(payload: Any) -> bool:
+    if isinstance(payload, list):
+        return True
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        key in payload
+        for key in ("blocks", "summary", "final_summary", "result", "data", "payload", "response")
+    )
+
+
+def _coerce_summary_payload(payload: Any) -> Any:
+    if isinstance(payload, list):
+        return {"blocks": payload}
+
+    current = payload
+    wrapper_keys = ("result", "data", "payload", "response", "summary", "final_summary", "content")
+    for _ in range(6):
+        if isinstance(current, list):
+            return {"blocks": current}
+        if not isinstance(current, dict):
+            return current
+
+        blocks = current.get("blocks")
+        if isinstance(blocks, list):
+            return current
+
+        nested: Any = None
+        for key in wrapper_keys:
+            candidate = current.get(key)
+            if isinstance(candidate, list):
+                return {"blocks": candidate}
+            if isinstance(candidate, dict):
+                if isinstance(candidate.get("blocks"), list):
+                    return {"blocks": candidate.get("blocks")}
+                nested = candidate
+                break
+            if isinstance(candidate, str) and "{" in candidate:
+                try:
+                    candidate_payload = _load_json_payload(candidate)
+                except LLMResponseParseError:
+                    continue
+                if isinstance(candidate_payload, list):
+                    return {"blocks": candidate_payload}
+                if isinstance(candidate_payload, dict):
+                    if isinstance(candidate_payload.get("blocks"), list):
+                        return {"blocks": candidate_payload.get("blocks")}
+                    nested = candidate_payload
+                    break
+        if nested is None:
+            return current
+        current = nested
+    return current
+
+
 def _parse_entities_payload(raw_content: str, selected_entities: list[str]) -> dict[str, Any]:
     try:
         payload = _load_json_payload(raw_content)
@@ -678,7 +934,13 @@ def _parse_entities_payload(raw_content: str, selected_entities: list[str]) -> d
             allowed_ids = {node["id"] for node in nodes}
             ref_map = {key: node_id for key, node_id in ref_map.items() if node_id in allowed_ids}
 
-        edges = _normalize_edges(edges_raw, ref_map, {node["id"] for node in nodes})
+        node_by_id = {str(node.get("id", "")): node for node in nodes if isinstance(node, dict)}
+        edges = _normalize_edges(
+            edges_raw,
+            ref_map,
+            {node["id"] for node in nodes},
+            node_by_id=node_by_id,
+        )
         return {"nodes": nodes, "edges": edges}
     except LLMResponseParseError:
         logger.exception(
@@ -690,11 +952,12 @@ def _parse_entities_payload(raw_content: str, selected_entities: list[str]) -> d
 
 def _parse_enrichment_payload(raw_content: str) -> dict[str, list[Any]]:
     payload = _load_json_payload(raw_content)
+    payload = _select_entity_payload_candidate(payload, raw_content)
+    payload = _coerce_entity_graph_payload(payload)
     if not isinstance(payload, dict):
         raise LLMResponseParseError("Enrichment response JSON must be an object")
 
-    nodes_raw = payload.get("nodes")
-    edges_raw = payload.get("edges")
+    nodes_raw, edges_raw = _extract_entity_lists(payload)
     if not isinstance(nodes_raw, list):
         raise LLMResponseParseError("Enrichment response must contain 'nodes' as a list")
     if not isinstance(edges_raw, list):
@@ -736,8 +999,46 @@ def _parse_final_summary_payload(raw_content: str) -> dict[str, Any]:
         raise LLMResponseParseError("Final summary response must contain 'final_summary' object")
 
     title = str(final_summary_raw.get("title", "")).strip() or "Итоговый конспект"
-    blocks = _parse_summary_payload(json.dumps({"blocks": final_summary_raw.get("blocks", [])}, ensure_ascii=False)).get("blocks", [])
+    blocks = _parse_summary_payload(
+        json.dumps({"blocks": final_summary_raw.get("blocks", [])}, ensure_ascii=False)
+    ).get("blocks", [])
     return {"final_summary": {"title": title, "blocks": blocks}}
+
+
+def _normalize_existing_summary_blocks(summary_blocks: list[dict[str, Any]]) -> list[dict[str, str]]:
+    blocks: list[dict[str, str]] = []
+    for index, item in enumerate(summary_blocks, start=1):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        block_type = _normalize_block_type(item.get("type"))
+        title = str(item.get("title", "")).strip() or _default_title(block_type, index)
+        blocks.append({"title": title, "text": text, "type": block_type})
+    return blocks
+
+
+def _prepare_final_summary_input(summary_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for index, item in enumerate(summary_blocks, start=1):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        normalized: dict[str, Any] = dict(item)
+        raw_order = item.get("order")
+        try:
+            parsed_order = int(raw_order) if raw_order is not None and str(raw_order).strip() else index
+        except (TypeError, ValueError):
+            parsed_order = index
+        normalized["id"] = str(item.get("id") or f"b{index}")
+        normalized["order"] = parsed_order
+        normalized["section_id"] = str(item.get("section_id") or f"s{index}")
+        normalized["word_count"] = len(re.findall(r"[A-Za-zА-Яа-яЁё0-9']+", text))
+        prepared.append(normalized)
+    return prepared
 
 
 def _coerce_entity_graph_payload(payload: Any) -> Any:
@@ -965,6 +1266,82 @@ def _normalize_selected_entities(selected_entities: Optional[list[str] | str]) -
     return normalized
 
 
+def _build_heuristic_entity_graph(
+    lecture_text: str,
+    selected_entities: list[str],
+    *,
+    max_nodes: int = 12,
+) -> dict[str, list[dict[str, Any]]]:
+    token_re = re.compile(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9'\\-]{2,}")
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+
+    for match in token_re.finditer(lecture_text):
+        raw = match.group(0)
+        normalized = _normalize_label_key(raw)
+        if (
+            not normalized
+            or normalized.isdigit()
+            or len(normalized) < 4
+            or normalized in ENTITY_FALLBACK_STOPWORDS
+        ):
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
+        display.setdefault(normalized, raw.strip())
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in selected_entities:
+        if item and item not in seen:
+            ordered.append(item)
+            seen.add(item)
+
+    ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    for token, _count in ranked:
+        if token in seen:
+            continue
+        ordered.append(token)
+        seen.add(token)
+        if len(ordered) >= max_nodes:
+            break
+
+    ordered = ordered[:max_nodes]
+    if not ordered:
+        return {"nodes": [], "edges": []}
+
+    nodes: list[dict[str, Any]] = []
+    for idx, token in enumerate(ordered, start=1):
+        node_id = f"heur_{idx}"
+        label = display.get(token) or token
+        nodes.append(
+            {
+                "id": node_id,
+                "label": str(label).strip() or token,
+                "type": "concept",
+                "mentions": [],
+            }
+        )
+
+    edges: list[dict[str, Any]] = []
+    node_by_id = {str(node["id"]): node for node in nodes}
+    if len(nodes) > 1:
+        root_id = nodes[0]["id"]
+        for node in nodes[1:]:
+            edges.append(
+                {
+                    "source": root_id,
+                    "target": node["id"],
+                    "label": _infer_edge_label(
+                        node_by_id.get(root_id),
+                        node_by_id.get(str(node["id"])),
+                        DEFAULT_EDGE_LABEL,
+                    ),
+                }
+            )
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def _normalize_nodes(nodes_raw: list[Any]) -> tuple[list[dict[str, Any]], dict[str, str]]:
     dedup: dict[str, dict[str, Any]] = {}
     ref_map: dict[str, str] = {}
@@ -1097,7 +1474,12 @@ def _merge_graph_payload(
         node_by_key[key] = merged
 
     allowed_ids = {str(node["id"]) for node in merged_nodes}
-    merged_edges = _normalize_edges([*base_edges_raw, *new_edges_raw], ref_map, allowed_ids)
+    merged_edges = _normalize_edges(
+        [*base_edges_raw, *new_edges_raw],
+        ref_map,
+        allowed_ids,
+        node_by_id={str(node.get("id", "")): node for node in merged_nodes if isinstance(node, dict)},
+    )
     return {"nodes": merged_nodes, "edges": merged_edges}
 
 
@@ -1190,6 +1572,8 @@ def _normalize_edges(
     edges_raw: list[Any],
     ref_map: dict[str, str],
     allowed_node_ids: set[str],
+    *,
+    node_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     edges: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -1207,7 +1591,12 @@ def _normalize_edges(
         if source_id == target_id:
             continue
 
-        label = str(item.get("label", "")).strip() or DEFAULT_EDGE_LABEL
+        raw_label = str(item.get("label", "")).strip()
+        label = _infer_edge_label(
+            node_by_id.get(source_id) if node_by_id else None,
+            node_by_id.get(target_id) if node_by_id else None,
+            raw_label,
+        )
         key = (source_id, target_id, label.lower())
         if key in seen:
             continue
@@ -1215,6 +1604,37 @@ def _normalize_edges(
         edges.append({"source": source_id, "target": target_id, "label": label})
 
     return edges
+
+
+def _infer_edge_label(
+    source_node: dict[str, Any] | None,
+    target_node: dict[str, Any] | None,
+    raw_label: str,
+) -> str:
+    normalized_label = str(raw_label or "").strip()
+    lowered = normalized_label.lower().replace("-", "_").replace(" ", "_")
+    if normalized_label and lowered not in GENERIC_EDGE_LABELS:
+        return normalized_label
+
+    source_type = _normalize_entity_type((source_node or {}).get("type"))
+    target_type = _normalize_entity_type((target_node or {}).get("type"))
+
+    pair = (source_type, target_type)
+    pair_to_label = {
+        ("concept", "concept"): "related_concept",
+        ("concept", "technology"): "implemented_by",
+        ("technology", "concept"): "implements",
+        ("person", "concept"): "explains",
+        ("concept", "person"): "explained_by",
+        ("person", "technology"): "uses",
+        ("technology", "person"): "used_by",
+        ("term", "concept"): "refers_to",
+        ("concept", "term"): "defined_by",
+        ("person", "person"): "collaborates_with",
+        ("technology", "technology"): "integrates_with",
+        ("term", "term"): "same_topic",
+    }
+    return pair_to_label.get(pair, DEFAULT_EDGE_LABEL)
 
 
 def _normalize_mentions(raw_mentions: Any) -> list[dict[str, Any]]:

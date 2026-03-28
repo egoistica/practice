@@ -299,6 +299,7 @@ def _dynamic_block_limits(segments: list[_Segment]) -> tuple[int, float]:
 def _block_to_payload(block: _Block, segments: list[_Segment]) -> dict[str, float | str]:
     text = " ".join(segment.text for segment in segments[block.start_idx : block.end_idx + 1]).strip()
     return {
+        "segment_id": f"seg_{block.start_idx + 1}_{block.end_idx + 1}",
         "timecode_start": round(segments[block.start_idx].start, 3),
         "timecode_end": round(segments[block.end_idx].end, 3),
         "text": text,

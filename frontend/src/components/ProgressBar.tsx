@@ -31,13 +31,20 @@ function normalizeStatus(value: unknown, fallback: string): string {
 }
 
 function buildWebSocketUrl(lectureId: string, token: string): string {
-  const rawBase = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+  const configuredBase = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+  const isLocalClient = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  const configuredPointsToLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configuredBase);
+  const rawBase = configuredBase && !(configuredPointsToLocalhost && !isLocalClient)
+    ? configuredBase
+    : window.location.origin;
+
   let parsed: URL;
   try {
-    parsed = new URL(rawBase);
+    parsed = new URL(rawBase, window.location.origin);
   } catch {
     parsed = new URL(window.location.origin);
   }
+
   const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
   const normalizedBasePath = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
   return `${protocol}//${parsed.host}${normalizedBasePath}/ws/${encodeURIComponent(lectureId)}?token=${encodeURIComponent(token)}`;

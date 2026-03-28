@@ -29,6 +29,7 @@ class LectureResponse(BaseModel):
     id: UUID
     title: str
     status: str
+    mode: str
     processing_progress: int
     created_at: datetime
 

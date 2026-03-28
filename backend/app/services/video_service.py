@@ -235,6 +235,7 @@ def download_video(url: str, output_path: str) -> str:
     last_error: yt_dlp.utils.DownloadError | None = None
     saw_format_unavailable = False
     saw_stream_forbidden = False
+    saw_only_images = False
 
     for format_spec in format_candidates:
         ydl_opts = dict(ydl_base_opts)
@@ -283,12 +284,16 @@ def download_video(url: str, output_path: str) -> str:
                 "requested format is not available" in normalized_message
                 or "only images are available" in normalized_message
             ):
+                if "only images are available" in normalized_message:
+                    saw_only_images = True
                 saw_format_unavailable = True
                 logger.warning(
                     "yt-dlp requested format unavailable: url=%s format=%s",
                     normalized_url,
                     format_spec,
                 )
+                if saw_only_images:
+                    break
                 continue
             logger.warning(
                 "yt-dlp download attempt failed: url=%s format=%s error=%s",
@@ -300,6 +305,12 @@ def download_video(url: str, output_path: str) -> str:
 
     if last_error is not None:
         if saw_format_unavailable:
+            if saw_only_images:
+                raise VideoDownloadError(
+                    "YouTube exposed only storyboard/image formats in the current environment, "
+                    "so media streams are not downloadable. "
+                    "Try exporting fresh youtube.com cookies or upload the file manually."
+                ) from last_error
             raise VideoDownloadError(
                 "YouTube did not provide the requested media formats in the current environment "
                 "after trying fallback format candidates. "

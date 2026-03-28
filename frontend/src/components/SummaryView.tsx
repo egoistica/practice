@@ -7,7 +7,6 @@ import { apiClient } from "../api/client";
 type SummaryBlock = {
   title: string;
   text: string;
-  type: string;
   timecode_start: number | null;
   timecode_end: number | null;
 };
@@ -30,7 +29,6 @@ function blockKey(block: SummaryBlock): string {
   return [
     block.title.trim().toLowerCase(),
     block.text.trim().toLowerCase(),
-    block.type.trim().toLowerCase(),
     String(block.timecode_start ?? ""),
     String(block.timecode_end ?? ""),
   ].join("|");
@@ -60,36 +58,27 @@ function formatTimecode(seconds: number | null): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function blockTypeLabel(type: string): string {
-  const normalized = type.trim().toLowerCase();
-  if (normalized === "definition") {
-    return "Definition";
-  }
-  if (normalized === "date") {
-    return "Date";
-  }
-  if (normalized === "conclusion") {
-    return "Conclusion";
-  }
-  return type.trim() || type;
-}
-
-function blockTypeStyle(type: string): { borderColor: string; background: string; labelBg: string } {
-  const normalized = type.trim().toLowerCase();
-  if (normalized === "definition") {
-    return { borderColor: "#2563eb", background: "#eff6ff", labelBg: "#dbeafe" };
-  }
-  if (normalized === "date") {
-    return { borderColor: "#7c3aed", background: "#f5f3ff", labelBg: "#ede9fe" };
-  }
-  if (normalized === "conclusion") {
-    return { borderColor: "#16a34a", background: "#f0fdf4", labelBg: "#dcfce7" };
-  }
-  return { borderColor: "#f59e0b", background: "#fffbeb", labelBg: "#fef3c7" };
-}
-
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseFilename(contentDisposition: string | undefined, fallback: string): string {
+  if (!contentDisposition) {
+    return fallback;
+  }
+  const utfMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch && utfMatch[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1].replace(/"/g, ""));
+    } catch {
+      return utfMatch[1].replace(/"/g, "");
+    }
+  }
+  const regularMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+  if (regularMatch && regularMatch[1]) {
+    return regularMatch[1];
+  }
+  return fallback;
 }
 
 export default function SummaryView({
@@ -102,6 +91,7 @@ export default function SummaryView({
   const queryClient = useQueryClient();
   const [enrichedKeys, setEnrichedKeys] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
+  const [downloadingFormat, setDownloadingFormat] = useState<"md" | "pdf" | "json" | null>(null);
 
   const normalizedEntities = useMemo(() => {
     const seen = new Set<string>();
@@ -143,6 +133,31 @@ export default function SummaryView({
       setActionError(extractErrorMessage(error, "Failed to enrich summary."));
     },
   });
+
+  async function handleExport(format: "md" | "pdf" | "json") {
+    setActionError(null);
+    setDownloadingFormat(format);
+    try {
+      const response = await apiClient.get(`/lectures/${lectureId}/export`, {
+        params: { format },
+        responseType: "blob",
+      });
+      const fallbackName = `lecture-${lectureId}-summary.${format}`;
+      const filename = parseFilename(response.headers["content-disposition"], fallbackName);
+      const blobUrl = URL.createObjectURL(response.data);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      setActionError(extractErrorMessage(error, `Failed to export summary as ${format.toUpperCase()}.`));
+    } finally {
+      setDownloadingFormat(null);
+    }
+  }
 
   function renderTextWithEntities(text: string) {
     if (!normalizedEntities.length || !onEntityClick) {
@@ -200,6 +215,15 @@ export default function SummaryView({
           <button disabled={enrichMutation.isPending} onClick={() => enrichMutation.mutate()} type="button">
             {enrichMutation.isPending ? "Enriching..." : "Enrich summary"}
           </button>
+          <button disabled={downloadingFormat === "md"} onClick={() => handleExport("md")} type="button">
+            {downloadingFormat === "md" ? "Downloading..." : "⇩ MD"}
+          </button>
+          <button disabled={downloadingFormat === "pdf"} onClick={() => handleExport("pdf")} type="button">
+            {downloadingFormat === "pdf" ? "Downloading..." : "⇩ PDF"}
+          </button>
+          <button disabled={downloadingFormat === "json"} onClick={() => handleExport("json")} type="button">
+            {downloadingFormat === "json" ? "Downloading..." : "⇩ JSON"}
+          </button>
         </div>
       </div>
 
@@ -213,7 +237,6 @@ export default function SummaryView({
 
       <div style={{ display: "grid", gap: "0.6rem" }}>
         {summary.blocks.map((block, index) => {
-          const style = blockTypeStyle(block.type);
           const key = blockKey(block);
           const isEnrichedBlock = enrichedKeys.has(key);
           const startLabel = formatTimecode(block.timecode_start);
@@ -224,28 +247,15 @@ export default function SummaryView({
             <article
               key={`${summary.id}-${index}-${block.title}`}
               style={{
-                border: `1px ${isEnrichedBlock ? "dashed" : "solid"} ${style.borderColor}`,
+                border: `1px ${isEnrichedBlock ? "dashed" : "solid"} ${isEnrichedBlock ? "#0ea5e9" : "#d1d5db"}`,
                 borderRadius: "0.6rem",
                 padding: "0.75rem",
                 display: "grid",
                 gap: "0.4rem",
-                background: style.background,
+                background: isEnrichedBlock ? "#f0f9ff" : "#ffffff",
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "center" }}>
-                <strong>{block.title}</strong>
-                <span
-                  style={{
-                    fontSize: "0.8rem",
-                    color: "#1f2937",
-                    background: style.labelBg,
-                    borderRadius: "999px",
-                    padding: "0.2rem 0.55rem",
-                  }}
-                >
-                  {blockTypeLabel(block.type)}
-                </span>
-              </div>
+              <strong>{block.title}</strong>
               {hasTimecode ? (
                 <small style={{ color: "#4b5563" }}>
                   {startLabel || "?"} - {endLabel || "?"}{" "}

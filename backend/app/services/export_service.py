@@ -46,7 +46,6 @@ def export_summary_to_markdown(summary: Summary) -> str:
         start = _format_timecode(block["timecode_start"])
         end = _format_timecode(block["timecode_end"])
         lines.append(f"## {idx}. {block['title']}")
-        lines.append(f"- Type: `{block['type']}`")
         lines.append(f"- Timecode: `{start} - {end}`")
         lines.append("")
         lines.append(block["text"])
@@ -57,12 +56,22 @@ def export_summary_to_markdown(summary: Summary) -> str:
 
 def export_summary_to_json(summary: Summary) -> str:
     blocks = _normalize_blocks(summary)
+    export_blocks = [
+        {
+            "title": block.get("title"),
+            "text": block.get("text"),
+            "timecode_start": block.get("timecode_start"),
+            "timecode_end": block.get("timecode_end"),
+            "enriched": bool(block.get("enriched", False)),
+        }
+        for block in blocks
+    ]
     payload = {
         "id": str(summary.id),
         "lecture_id": str(summary.lecture_id),
         "created_at": summary.created_at.isoformat(),
         "enriched": any(bool(item.get("enriched")) for item in blocks),
-        "blocks": blocks,
+        "blocks": export_blocks,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -165,7 +174,6 @@ def export_summary_to_pdf(summary: Summary) -> bytes:
         start = _format_timecode(block["timecode_start"])
         end = _format_timecode(block["timecode_end"])
         write_wrapped(f"{idx}. {block['title']}", font_name=bold_font, font_size=12, spacing=4.0)
-        write_wrapped(f"Type: {block['type']}", font_name=regular_font, font_size=10, spacing=2.0)
         write_wrapped(f"Timecode: {start} - {end}", font_name=regular_font, font_size=10, spacing=2.0)
         write_wrapped(block["text"], font_name=regular_font, font_size=11, spacing=4.0)
         y -= 8

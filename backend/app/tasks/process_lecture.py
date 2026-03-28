@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, TypeVar
@@ -46,6 +47,78 @@ try:
 except (TypeError, ValueError):
     _parsed_realtime_segment_seconds = 60
 REALTIME_SEGMENT_SECONDS = max(15, _parsed_realtime_segment_seconds)
+SUMMARY_MIN_WORDS_PER_REQUEST = 220
+SUMMARY_MAX_WORDS_PER_REQUEST = 700
+SUMMARY_INTERMEDIATE_MAX_BLOCKS = 48
+SUMMARY_FINAL_MAX_BLOCKS = 30
+SUMMARY_MIN_BLOCKS = 8
+SUMMARY_BLOCK_MAX_WORDS = 95
+SUMMARY_BLOCK_TARGET_WORDS = 65
+SECTION_MIN_WORDS = 180
+SECTION_TARGET_WORDS = 320
+SECTION_MAX_WORDS = 620
+_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+")
+_SUMMARY_TEXT_KEY_RE = re.compile(r"[^A-Za-zА-Яа-яЁё0-9]+")
+_SECTION_BOUNDARY_MARKER_RE = re.compile(
+    r"^\s*(итак|теперь|важн\w+\s+момент|главн\w+\s+иде\w+|например|с другой стороны|другими словами|подвед[её]м итог|в итоге|таким образом)\b",
+    flags=re.IGNORECASE,
+)
+_TRANSCRIPT_FILLER_RE = re.compile(r"\b(ээ+|эм+|мм+)\b", flags=re.IGNORECASE)
+_DATE_SIGNAL_RE = re.compile(
+    r"(\b\d{1,2}[./-]\d{1,2}([./-]\d{2,4})?\b|\b\d{4}\b|\b(год|года|году|век|века|январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*)",
+    flags=re.IGNORECASE,
+)
+_DEFINITION_SIGNAL_RE = re.compile(
+    r"\b(это|называется|означает|подразумевает|определя\w+|термин|поняти\w+)\b",
+    flags=re.IGNORECASE,
+)
+_CONCLUSION_SIGNAL_RE = re.compile(
+    r"\b(вывод|итог|главн\w*|таким образом|следовательн\w*|в итоге|поэтому|значит)\b",
+    flags=re.IGNORECASE,
+)
+_SUMMARY_SIMILARITY_STOPWORDS = {
+    "это",
+    "этот",
+    "эта",
+    "эти",
+    "как",
+    "или",
+    "для",
+    "при",
+    "после",
+    "перед",
+    "между",
+    "когда",
+    "чтобы",
+    "только",
+    "более",
+    "менее",
+    "очень",
+    "который",
+    "которая",
+    "которые",
+    "также",
+    "тоже",
+    "если",
+    "тогда",
+    "здесь",
+    "потому",
+    "поэтому",
+    "быть",
+    "был",
+    "была",
+    "были",
+    "есть",
+    "его",
+    "ее",
+    "них",
+    "них",
+    "from",
+    "that",
+    "with",
+    "this",
+    "have",
+}
 
 
 def _run_async(coro: Awaitable[_T]) -> _T:
@@ -473,7 +546,7 @@ def _timecode_range(blocks: list[dict[str, Any]]) -> tuple[float | None, float |
 
 def _segment_placeholders(segmented_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     placeholders: list[dict[str, Any]] = []
-    for block in segmented_blocks:
+    for idx, block in enumerate(segmented_blocks, start=1):
         if not isinstance(block, dict):
             continue
         text = str(block.get("text", "")).strip()
@@ -485,9 +558,201 @@ def _segment_placeholders(segmented_blocks: list[dict[str, Any]]) -> list[dict[s
                 "text": text,
                 "timecode_start": block.get("timecode_start"),
                 "timecode_end": block.get("timecode_end"),
+                "segment_id": str(block.get("segment_id") or f"seg_{idx}"),
             }
         )
     return placeholders
+
+
+def _count_words(text: str) -> int:
+    return len(_WORD_RE.findall(str(text or "")))
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        return int(text)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coalesce_segmented_blocks(
+    segmented_blocks: list[dict[str, Any]],
+    *,
+    min_words: int = SUMMARY_MIN_WORDS_PER_REQUEST,
+    max_words: int = SUMMARY_MAX_WORDS_PER_REQUEST,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for idx, block in enumerate(segmented_blocks, start=1):
+        if not isinstance(block, dict):
+            continue
+        text = str(block.get("text", "")).strip()
+        if not text:
+            continue
+        normalized.append(
+            {
+                "text": text,
+                "timecode_start": block.get("timecode_start"),
+                "timecode_end": block.get("timecode_end"),
+                "_words": _count_words(text),
+                "segment_id": str(block.get("segment_id") or f"seg_{idx}"),
+            }
+        )
+
+    if not normalized:
+        return []
+
+    merged: list[dict[str, Any]] = []
+    current_texts: list[str] = []
+    current_source_segment_ids: list[str] = []
+    current_start: Any = None
+    current_end: Any = None
+    current_words = 0
+
+    def flush_current() -> None:
+        nonlocal current_texts, current_source_segment_ids, current_start, current_end, current_words
+        if not current_texts:
+            return
+        merged.append(
+            {
+                "text": " ".join(current_texts).strip(),
+                "timecode_start": current_start,
+                "timecode_end": current_end,
+                "source_segment_ids": list(current_source_segment_ids),
+            }
+        )
+        current_texts = []
+        current_source_segment_ids = []
+        current_start = None
+        current_end = None
+        current_words = 0
+
+    for block in normalized:
+        block_words = int(block["_words"])
+        block_text = str(block["text"])
+
+        if not current_texts:
+            current_texts = [block_text]
+            current_source_segment_ids = [str(block.get("segment_id"))]
+            current_start = block.get("timecode_start")
+            current_end = block.get("timecode_end")
+            current_words = block_words
+            continue
+
+        projected_words = current_words + block_words
+        if current_words < int(min_words) or projected_words <= int(max_words):
+            current_texts.append(block_text)
+            current_source_segment_ids.append(str(block.get("segment_id")))
+            current_end = block.get("timecode_end")
+            current_words = projected_words
+            continue
+
+        flush_current()
+        current_texts = [block_text]
+        current_source_segment_ids = [str(block.get("segment_id"))]
+        current_start = block.get("timecode_start")
+        current_end = block.get("timecode_end")
+        current_words = block_words
+
+    flush_current()
+    for idx, item in enumerate(merged, start=1):
+        item["chunk_id"] = f"c{idx}"
+        item["order"] = idx
+        item["word_count"] = _count_words(str(item.get("text", "")))
+    return merged
+
+
+def _normalize_str_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, list) else [raw]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
+def _has_section_boundary_signal(text: str) -> bool:
+    return bool(_SECTION_BOUNDARY_MARKER_RE.search(str(text or "").strip()))
+
+
+def _build_section_blocks(coalesced_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not coalesced_blocks:
+        return []
+
+    sections_raw: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_words = 0
+    for block in coalesced_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_text = str(block.get("text", "")).strip()
+        if not block_text:
+            continue
+        block_words = int(block.get("word_count", _count_words(block_text)))
+        if not current:
+            current = [block]
+            current_words = block_words
+            continue
+
+        projected_words = current_words + block_words
+        prev_text = str(current[-1].get("text", ""))
+        should_split = False
+        if projected_words > SECTION_MAX_WORDS:
+            should_split = True
+        elif current_words >= SECTION_TARGET_WORDS and _has_section_boundary_signal(block_text):
+            should_split = True
+        elif current_words >= SECTION_MIN_WORDS and _has_section_boundary_signal(prev_text):
+            should_split = True
+
+        if should_split:
+            sections_raw.append(current)
+            current = [block]
+            current_words = block_words
+            continue
+
+        current.append(block)
+        current_words = projected_words
+
+    if current:
+        sections_raw.append(current)
+
+    sections: list[dict[str, Any]] = []
+    for idx, section_blocks in enumerate(sections_raw, start=1):
+        text = " ".join(str(block.get("text", "")).strip() for block in section_blocks if str(block.get("text", "")).strip()).strip()
+        if not text:
+            continue
+        starts = [float(block["timecode_start"]) for block in section_blocks if block.get("timecode_start") is not None]
+        ends = [float(block["timecode_end"]) for block in section_blocks if block.get("timecode_end") is not None]
+        source_segment_ids: list[str] = []
+        source_chunk_ids: list[str] = []
+        for block in section_blocks:
+            source_segment_ids.extend(_normalize_str_list(block.get("source_segment_ids")))
+            source_chunk_ids.extend(_normalize_str_list(block.get("source_chunk_ids", block.get("chunk_id"))))
+        sections.append(
+            {
+                "section_id": f"s{idx}",
+                "order": idx,
+                "text": text,
+                "word_count": _count_words(text),
+                "timecode_start": min(starts) if starts else None,
+                "timecode_end": max(ends) if ends else None,
+                "source_segment_ids": _normalize_str_list(source_segment_ids),
+                "source_chunk_ids": _normalize_str_list(source_chunk_ids),
+            }
+        )
+    return sections
 
 
 def _aggregate_summary_blocks(
@@ -496,8 +761,17 @@ def _aggregate_summary_blocks(
     lecture_title: str,
     mode: str,
 ) -> list[dict[str, Any]]:
+    coalesced_blocks = _coalesce_segmented_blocks(segmented_blocks)
+    section_blocks = _build_section_blocks(coalesced_blocks)
+    section_by_chunk: dict[str, str] = {}
+    for section in section_blocks:
+        section_id = str(section.get("section_id") or "")
+        for chunk_id in _normalize_str_list(section.get("source_chunk_ids")):
+            section_by_chunk[chunk_id] = section_id
+
     result: list[dict[str, Any]] = []
-    for block in segmented_blocks:
+    block_index = 0
+    for block in coalesced_blocks:
         if not isinstance(block, dict):
             continue
         block_text = str(block.get("text", "")).strip()
@@ -506,6 +780,10 @@ def _aggregate_summary_blocks(
 
         timecode_start = block.get("timecode_start")
         timecode_end = block.get("timecode_end")
+        chunk_id = str(block.get("chunk_id") or "")
+        section_id = section_by_chunk.get(chunk_id, "")
+        source_segment_ids = _normalize_str_list(block.get("source_segment_ids"))
+        block_order = _safe_int(block.get("order"), len(result) + 1)
         summary_payload = run_summary_agent(
             lecture_text=block_text,
             lecture_title=lecture_title,
@@ -518,8 +796,16 @@ def _aggregate_summary_blocks(
             text = str(item.get("text", "")).strip()
             if not text:
                 continue
+            block_index += 1
             result.append(
                 {
+                    "id": f"lb{block_index}",
+                    "section_id": section_id,
+                    "source_segment_ids": source_segment_ids,
+                    "source_chunk_ids": [chunk_id] if chunk_id else [],
+                    "summary_level": "local",
+                    "order": block_order * 10 + block_index,
+                    "word_count": _count_words(text),
                     "title": str(item.get("title", "")).strip() or "Блок",
                     "text": text,
                     "type": str(item.get("type", "thought")).strip() or "thought",
@@ -527,6 +813,47 @@ def _aggregate_summary_blocks(
                     "timecode_end": timecode_end,
                 }
             )
+
+    for section in section_blocks:
+        section_text = str(section.get("text", "")).strip()
+        if not section_text:
+            continue
+        summary_payload = run_summary_agent(
+            lecture_text=section_text,
+            lecture_title=lecture_title,
+            mode=mode,
+            llm_config={},
+        )
+        for item in summary_payload.get("blocks", []):
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            block_index += 1
+            result.append(
+                {
+                    "id": f"sb{block_index}",
+                    "section_id": str(section.get("section_id") or ""),
+                    "source_segment_ids": _normalize_str_list(section.get("source_segment_ids")),
+                    "source_chunk_ids": _normalize_str_list(section.get("source_chunk_ids")),
+                    "summary_level": "section",
+                    "order": _safe_int(section.get("order"), 0) * 100 + block_index,
+                    "word_count": _count_words(text),
+                    "title": str(item.get("title", "")).strip() or "Секция",
+                    "text": text,
+                    "type": str(item.get("type", "thought")).strip() or "thought",
+                    "timecode_start": section.get("timecode_start"),
+                    "timecode_end": section.get("timecode_end"),
+                }
+            )
+
+    result.sort(
+        key=lambda item: (
+            float(item["timecode_start"]) if item.get("timecode_start") is not None else 0.0,
+            _safe_int(item.get("order"), 0),
+        )
+    )
     return result
 
 
@@ -553,6 +880,65 @@ def _normalize_transcript_segments(segments: list[dict[str, Any]]) -> list[dict[
         normalized.append({"start": start, "end": end, "text": text})
     normalized.sort(key=lambda item: (item["start"], item["end"]))
     return normalized
+
+
+def _clean_transcript_text(raw_text: str) -> str:
+    text = re.sub(r"\s+", " ", str(raw_text or "").strip())
+    if not text:
+        return ""
+    text = _TRANSCRIPT_FILLER_RE.sub(" ", text)
+    text = re.sub(r"(?:\bну\b[\s,]*){3,}", "ну ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:\bвот\b[\s,]*){3,}", "вот ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:\bтипа\b[\s,]*){2,}", "типа ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:\bкак бы\b[\s,]*){2,}", "как бы ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([,.;:!?]){2,}", r"\1", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ,.;:")
+
+
+def _cleanup_transcript_payload(
+    segments: list[dict[str, Any]],
+    full_text: str,
+) -> tuple[list[dict[str, Any]], str]:
+    normalized = _normalize_transcript_segments(segments)
+    if not normalized:
+        cleaned_text = _clean_transcript_text(full_text)
+        return segments, cleaned_text or str(full_text or "").strip()
+
+    cleaned_segments: list[dict[str, Any]] = []
+    last_text_key = ""
+    for item in normalized:
+        cleaned_text = _clean_transcript_text(str(item.get("text", "")))
+        if not cleaned_text:
+            continue
+        text_key = cleaned_text.lower()
+        if text_key == last_text_key:
+            continue
+        last_text_key = text_key
+        cleaned_segments.append(
+            {
+                "start": float(item.get("start", 0.0)),
+                "end": float(item.get("end", 0.0)),
+                "text": cleaned_text,
+            }
+        )
+
+    if not cleaned_segments:
+        fallback_text = _clean_transcript_text(full_text)
+        return segments, fallback_text or str(full_text or "").strip()
+
+    cleaned_full_text = " ".join(item["text"] for item in cleaned_segments).strip()
+    if not cleaned_full_text:
+        return segments, str(full_text or "").strip()
+
+    original_words = max(_count_words(full_text), 1)
+    cleaned_words = _count_words(cleaned_full_text)
+    if cleaned_words < max(20, int(original_words * 0.25)):
+        # Safety: don't accept over-aggressive cleanup.
+        return segments, str(full_text or "").strip()
+
+    return cleaned_segments, cleaned_full_text
 
 
 def _build_realtime_chunks(
@@ -666,11 +1052,10 @@ def _build_fallback_summary_blocks(
     ]
 
 
-def _summary_key(block: dict[str, Any]) -> tuple[str, str, str]:
+def _summary_key(block: dict[str, Any]) -> tuple[str, str]:
     return (
         str(block.get("title", "")).strip().lower(),
         str(block.get("text", "")).strip().lower(),
-        str(block.get("type", "")).strip().lower(),
     )
 
 
@@ -686,6 +1071,316 @@ def _merge_summary_blocks(existing: list[dict[str, Any]], incoming: list[dict[st
         seen.add(key)
         merged.append(item)
     return merged
+
+
+def _normalize_block_text(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip())
+
+
+def _normalize_type_with_content(block_type: Any, *, title: str, text: str) -> str:
+    candidate = str(block_type or "thought").strip().lower() or "thought"
+    if candidate not in {"thought", "definition", "date", "conclusion"}:
+        candidate = "thought"
+
+    content = f"{title} {text}"
+    if candidate == "date" and not _DATE_SIGNAL_RE.search(content):
+        return "thought"
+    if candidate == "definition" and not _DEFINITION_SIGNAL_RE.search(content):
+        return "thought"
+    if candidate == "conclusion" and not _CONCLUSION_SIGNAL_RE.search(content):
+        return "thought"
+    return candidate
+
+
+def _summary_text_key(text: str) -> str:
+    normalized = _SUMMARY_TEXT_KEY_RE.sub(" ", str(text or "").lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _summary_token_set(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in _WORD_RE.findall(str(text or "").lower()):
+        if len(token) < 4 or token in _SUMMARY_SIMILARITY_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def _merge_summary_pair(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    left_title = _normalize_block_text(left.get("title")) or "Блок"
+    right_title = _normalize_block_text(right.get("title")) or "Блок"
+    merged_title = left_title if left_title == right_title else left_title
+
+    left_text = _normalize_block_text(left.get("text"))
+    right_text = _normalize_block_text(right.get("text"))
+    if left_text and right_text:
+        if left_text in right_text:
+            merged_text = right_text
+        elif right_text in left_text:
+            merged_text = left_text
+        else:
+            merged_text = f"{left_text} {right_text}"
+    else:
+        merged_text = left_text or right_text
+
+    left_start = left.get("timecode_start")
+    right_start = right.get("timecode_start")
+    starts = [float(v) for v in (left_start, right_start) if v is not None]
+    merged_start = min(starts) if starts else None
+
+    left_end = left.get("timecode_end")
+    right_end = right.get("timecode_end")
+    ends = [float(v) for v in (left_end, right_end) if v is not None]
+    merged_end = max(ends) if ends else None
+
+    raw_type = left.get("type") if left.get("type") == right.get("type") else "thought"
+    merged_type = _normalize_type_with_content(raw_type, title=merged_title, text=merged_text)
+    merged_section_id = str(left.get("section_id") or right.get("section_id") or "").strip()
+    merged_source_segment_ids = _normalize_str_list(
+        _normalize_str_list(left.get("source_segment_ids")) + _normalize_str_list(right.get("source_segment_ids"))
+    )
+    merged_source_chunk_ids = _normalize_str_list(
+        _normalize_str_list(left.get("source_chunk_ids")) + _normalize_str_list(right.get("source_chunk_ids"))
+    )
+    left_order = _safe_int(left.get("order"), 0)
+    right_order = _safe_int(right.get("order"), 0)
+    merged_order = min(value for value in (left_order, right_order) if value > 0) if (left_order or right_order) else 0
+    merged_level = "section" if "section" in {str(left.get("summary_level", "")), str(right.get("summary_level", ""))} else "local"
+    return {
+        "title": merged_title,
+        "text": merged_text,
+        "type": merged_type,
+        "timecode_start": merged_start,
+        "timecode_end": merged_end,
+        "enriched": bool(left.get("enriched", False) or right.get("enriched", False)),
+        "section_id": merged_section_id,
+        "source_segment_ids": merged_source_segment_ids,
+        "source_chunk_ids": merged_source_chunk_ids,
+        "order": merged_order,
+        "summary_level": merged_level,
+        "word_count": _count_words(merged_text),
+    }
+
+
+def _split_text_into_word_chunks(text: str, max_words: int) -> list[str]:
+    words = str(text or "").split()
+    if not words:
+        return []
+    chunks: list[str] = []
+    for idx in range(0, len(words), max_words):
+        chunks.append(" ".join(words[idx : idx + max_words]).strip())
+    return [item for item in chunks if item]
+
+
+def _split_large_summary_block(block: dict[str, Any], *, max_words: int, target_words: int) -> list[dict[str, Any]]:
+    text = _normalize_block_text(block.get("text"))
+    if _count_words(text) <= max_words:
+        return [block]
+
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", text) if item.strip()]
+    if len(sentences) <= 1:
+        chunks = _split_text_into_word_chunks(text, max_words)
+    else:
+        chunks = []
+        current_parts: list[str] = []
+        current_words = 0
+        for sentence in sentences:
+            sentence_words = _count_words(sentence)
+            if sentence_words > max_words:
+                if current_parts:
+                    chunks.append(" ".join(current_parts).strip())
+                    current_parts = []
+                    current_words = 0
+                chunks.extend(_split_text_into_word_chunks(sentence, max_words))
+                continue
+
+            projected = current_words + sentence_words
+            if current_parts and projected > max_words:
+                chunks.append(" ".join(current_parts).strip())
+                current_parts = [sentence]
+                current_words = sentence_words
+                continue
+
+            current_parts.append(sentence)
+            current_words = projected
+            if current_words >= target_words:
+                chunks.append(" ".join(current_parts).strip())
+                current_parts = []
+                current_words = 0
+
+        if current_parts:
+            chunks.append(" ".join(current_parts).strip())
+
+    if not chunks:
+        return [block]
+
+    result: list[dict[str, Any]] = []
+    title_base = _normalize_block_text(block.get("title")) or "Блок"
+    for idx, chunk in enumerate(chunks, start=1):
+        result.append(
+            {
+                "title": title_base,
+                "text": chunk,
+                "type": _normalize_type_with_content(block.get("type"), title=title_base, text=chunk),
+                "timecode_start": block.get("timecode_start"),
+                "timecode_end": block.get("timecode_end"),
+                "enriched": bool(block.get("enriched", False)),
+                "id": str(block.get("id") or f"split_{idx}"),
+                "section_id": str(block.get("section_id", "")).strip(),
+                "source_segment_ids": _normalize_str_list(block.get("source_segment_ids")),
+                "source_chunk_ids": _normalize_str_list(block.get("source_chunk_ids")),
+                "summary_level": str(block.get("summary_level", "local")).strip() or "local",
+                "order": _safe_int(block.get("order"), 0),
+                "word_count": _count_words(chunk),
+            }
+        )
+    return result
+
+
+def _split_large_summary_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    max_words: int = SUMMARY_BLOCK_MAX_WORDS,
+    target_words: int = SUMMARY_BLOCK_TARGET_WORDS,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        result.extend(_split_large_summary_block(block, max_words=max_words, target_words=target_words))
+    return result
+
+
+def _target_summary_block_count(total_words: int, target_max_blocks: int | None) -> int:
+    if target_max_blocks is not None:
+        return max(SUMMARY_MIN_BLOCKS, int(target_max_blocks))
+
+    if total_words < 900:
+        target = 10
+    elif total_words < 1800:
+        target = 14
+    elif total_words < 3200:
+        target = 18
+    elif total_words < 5200:
+        target = 22
+    elif total_words < 7600:
+        target = 26
+    else:
+        target = SUMMARY_FINAL_MAX_BLOCKS
+    return max(SUMMARY_MIN_BLOCKS, min(int(target), SUMMARY_FINAL_MAX_BLOCKS))
+
+
+def _compact_summary_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    target_max_blocks: int | None = None,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        text = _normalize_block_text(item.get("text"))
+        if not text:
+            continue
+        title = _normalize_block_text(item.get("title")) or "Блок"
+        block_type = _normalize_type_with_content(item.get("type"), title=title, text=text)
+        prepared.append(
+            {
+                "id": str(item.get("id") or f"b{len(prepared) + 1}"),
+                "title": title,
+                "text": text,
+                "type": block_type,
+                "timecode_start": item.get("timecode_start"),
+                "timecode_end": item.get("timecode_end"),
+                "enriched": bool(item.get("enriched", False)),
+                "section_id": str(item.get("section_id", "")).strip(),
+                "source_segment_ids": _normalize_str_list(item.get("source_segment_ids")),
+                "source_chunk_ids": _normalize_str_list(item.get("source_chunk_ids")),
+                "summary_level": str(item.get("summary_level", "local")).strip() or "local",
+                "order": _safe_int(item.get("order"), len(prepared) + 1),
+                "word_count": _count_words(text),
+            }
+        )
+
+    if not prepared:
+        return []
+
+    deduped: list[dict[str, Any]] = []
+    seen_text_keys: set[str] = set()
+    for item in prepared:
+        key = _summary_text_key(str(item.get("text", "")))
+        if key and key in seen_text_keys:
+            continue
+        if key:
+            seen_text_keys.add(key)
+        deduped.append(item)
+
+    merged_adjacent: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(deduped):
+        current = deduped[idx]
+        if idx + 1 >= len(deduped):
+            merged_adjacent.append(current)
+            idx += 1
+            continue
+
+        nxt = deduped[idx + 1]
+        similarity = _jaccard_similarity(
+            _summary_token_set(str(current.get("text", ""))),
+            _summary_token_set(str(nxt.get("text", ""))),
+        )
+        current_words = _count_words(str(current.get("text", "")))
+        next_words = _count_words(str(nxt.get("text", "")))
+        should_merge = similarity >= 0.62 or (similarity >= 0.42 and current_words <= 24 and next_words <= 24)
+        if should_merge:
+            merged_adjacent.append(_merge_summary_pair(current, nxt))
+            idx += 2
+            continue
+
+        merged_adjacent.append(current)
+        idx += 1
+
+    compacted = merged_adjacent
+    compacted = _split_large_summary_blocks(compacted)
+    total_words = sum(_count_words(str(item.get("text", ""))) for item in compacted)
+    target = _target_summary_block_count(total_words, target_max_blocks)
+    while len(compacted) > target and len(compacted) > 1:
+        best_idx = 0
+        best_score = -1.0
+        for merge_idx in range(len(compacted) - 1):
+            left = compacted[merge_idx]
+            right = compacted[merge_idx + 1]
+            similarity = _jaccard_similarity(
+                _summary_token_set(str(left.get("text", ""))),
+                _summary_token_set(str(right.get("text", ""))),
+            )
+            combined_words = _count_words(str(left.get("text", ""))) + _count_words(str(right.get("text", "")))
+            if combined_words > SUMMARY_BLOCK_MAX_WORDS:
+                continue
+            if similarity > 0:
+                score = similarity + (0.2 if left.get("type") == right.get("type") else 0.0)
+            else:
+                score = 0.05 / max(combined_words, 1)
+            if score > best_score:
+                best_score = score
+                best_idx = merge_idx
+
+        if best_score < 0:
+            break
+        compacted[best_idx] = _merge_summary_pair(compacted[best_idx], compacted[best_idx + 1])
+        del compacted[best_idx + 1]
+
+    compacted = _split_large_summary_blocks(compacted)
+    return compacted
 
 
 def _convert_extra_blocks_to_summary(extra_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -717,7 +1412,7 @@ def _finalize_summary_blocks(
     current_blocks: list[dict[str, Any]],
     final_blocks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for block in current_blocks:
         if not isinstance(block, dict):
             continue
@@ -728,17 +1423,29 @@ def _finalize_summary_blocks(
         if not isinstance(block, dict):
             continue
         base = by_key.get(_summary_key(block), {})
+        text_value = str(block.get("text", "")).strip()
         finalized.append(
             {
+                "id": str(block.get("id") or base.get("id") or f"f{len(finalized) + 1}"),
+                "section_id": str(block.get("section_id") or base.get("section_id") or "").strip(),
+                "source_segment_ids": _normalize_str_list(
+                    _normalize_str_list(block.get("source_segment_ids")) + _normalize_str_list(base.get("source_segment_ids"))
+                ),
+                "source_chunk_ids": _normalize_str_list(
+                    _normalize_str_list(block.get("source_chunk_ids")) + _normalize_str_list(base.get("source_chunk_ids"))
+                ),
+                "summary_level": "final",
+                "order": _safe_int(block.get("order"), _safe_int(base.get("order"), len(finalized) + 1)),
+                "word_count": _count_words(text_value),
                 "title": str(block.get("title", "")).strip() or "Блок",
-                "text": str(block.get("text", "")).strip(),
+                "text": text_value,
                 "type": str(block.get("type", "thought")).strip() or "thought",
                 "timecode_start": base.get("timecode_start"),
                 "timecode_end": base.get("timecode_end"),
                 "enriched": bool(base.get("enriched", False)),
             }
         )
-    return [item for item in finalized if item.get("text")]
+    return _compact_summary_blocks([item for item in finalized if item.get("text")], target_max_blocks=SUMMARY_FINAL_MAX_BLOCKS)
 
 
 def _broadcast_realtime_event(lecture_uuid: uuid.UUID, event_type: str, payload: dict[str, object]) -> None:
@@ -890,6 +1597,10 @@ def _run_standard_enrichment_from_transcript(
             timecode_start=0.0,
             timecode_end=fallback_end,
         )
+    summary_blocks = _compact_summary_blocks(
+        summary_blocks,
+        target_max_blocks=SUMMARY_INTERMEDIATE_MAX_BLOCKS,
+    )
 
     if enrichment_enabled:
         enrichment_payload = run_enrichment_agent(
@@ -901,6 +1612,10 @@ def _run_standard_enrichment_from_transcript(
             list(enrichment_payload.get("extra_blocks", []))
         )
         summary_blocks = _merge_summary_blocks(summary_blocks, extra_summary_blocks)
+        summary_blocks = _compact_summary_blocks(
+            summary_blocks,
+            target_max_blocks=SUMMARY_INTERMEDIATE_MAX_BLOCKS,
+        )
 
     final_payload = run_final_summary_agent(
         summary_blocks=summary_blocks,
@@ -910,6 +1625,7 @@ def _run_standard_enrichment_from_transcript(
     final_blocks = list(final_payload.get("final_summary", {}).get("blocks", []))
     if final_blocks:
         summary_blocks = _finalize_summary_blocks(summary_blocks, final_blocks)
+    summary_blocks = _compact_summary_blocks(summary_blocks, target_max_blocks=SUMMARY_FINAL_MAX_BLOCKS)
 
     summary_start, summary_end = _timecode_range(summary_blocks)
     _run_async(
@@ -1124,6 +1840,9 @@ def transcribe_task(
         full_text = str(transcription.get("full_text", "")).strip()
         if not full_text:
             raise ValueError("Transcription returned empty text")
+        segments, full_text = _cleanup_transcript_payload(segments, full_text)
+        if not full_text:
+            raise ValueError("Transcription cleanup returned empty text")
 
         has_realtime_timestamps = False
         realtime_billable_amount = 0
@@ -1281,6 +2000,10 @@ def summary_agent_task(self, lecture_id: str) -> str:
                 timecode_start=0.0,
                 timecode_end=None,
             )
+        summary_blocks = _compact_summary_blocks(
+            summary_blocks,
+            target_max_blocks=SUMMARY_INTERMEDIATE_MAX_BLOCKS,
+        )
 
         summary_start, summary_end = _timecode_range(summary_blocks)
         _run_async(
@@ -1398,6 +2121,10 @@ def enrichment_agent_task(self, lecture_id: str) -> str:
             list(enrichment_payload.get("extra_blocks", []))
         )
         merged_blocks = _merge_summary_blocks(summary_blocks, extra_summary_blocks)
+        merged_blocks = _compact_summary_blocks(
+            merged_blocks,
+            target_max_blocks=SUMMARY_INTERMEDIATE_MAX_BLOCKS,
+        )
         summary_start, summary_end = _timecode_range(merged_blocks)
         _run_async(
             _upsert_summary_async(

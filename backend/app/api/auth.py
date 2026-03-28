@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 from datetime import timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,9 +80,11 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 @limiter.limit("5/minute")
 async def login(
     request: Request,
+    response: Response,
     payload: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
+    _ = response
     login_value = payload.username.strip()
     login_value_lower = login_value.lower()
 
